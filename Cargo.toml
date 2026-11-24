@@ -1,0 +1,13 @@
+[workspace]
+resolver = "2"
+members = ["ps2-rt", "tools/hello"]
+
+# Required because the target spec hard-codes "panic-strategy": "abort" and
+# core is built without unwinding support for this target.
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+lto = true
+codegen-units = 1

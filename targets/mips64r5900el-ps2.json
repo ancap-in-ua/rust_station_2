@@ -1,0 +1,26 @@
+{
+  "abi": "abi64",
+  "arch": "mips64",
+  "cpu": "mips3",
+  "data-layout": "e-m:e-i8:8:32-i16:16:32-i64:64-i128:128-n32:64-S128",
+  "crt-objects-fallback": "false",
+  "emit-debug-gdb-scripts": false,
+  "features": "+single-float,+noabicalls",
+  "linker": "rust-lld",
+  "linker-flavor": "gnu-lld",
+  "llvm-abiname": "n64",
+  "llvm-args": ["-mno-check-zero-division"],
+  "llvm-target": "mips64el-sony-ps2",
+  "max-atomic-width": 32,
+  "metadata": {
+    "description": "Sony PlayStation 2 Emotion Engine (MIPS R5900), bare metal, no OS",
+    "host_tools": false,
+    "std": false,
+    "tier": 3
+  },
+  "os": "none",
+  "panic-strategy": "abort",
+  "relocation-model": "static",
+  "target-pointer-width": 64,
+  "vendor": "sony"
+}

@@ -1,0 +1,10 @@
+[package]
+name = "ps2-rt"
+version = "0.1.0"
+edition = "2021"
+description = "Minimal bare-metal boot/runtime support for the PS2 Emotion Engine"
+
+[dependencies]
+
+[lib]
+crate-type = ["rlib"]

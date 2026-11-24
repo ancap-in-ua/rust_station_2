@@ -1,0 +1,21 @@
+# Custom target: there is no built-in rustc target for the PS2's Emotion
+# Engine (MIPS R5900), unlike e.g. mipsel-sony-psx for the PS1. See
+# targets/mips64r5900el-ps2.json and the top-level README for caveats.
+[build]
+target = "targets/mips64r5900el-ps2.json"
+
+# `core`/`alloc` have no prebuilt artifacts for this target, so we rebuild
+# them from source. This requires the nightly toolchain pinned in
+# rust-toolchain.toml (it is picked up automatically by rustup).
+[unstable]
+build-std = ["core"]
+build-std-features = ["compiler-builtins-mem"]
+json-target-spec = true
+
+[target.mips64r5900el-ps2]
+rustflags = [
+  "-C", "link-arg=-Tps2-rt/link.ld",
+]
+
+# Run `cargo` commands from the workspace root: the linker script path above
+# is resolved relative to the current working directory.

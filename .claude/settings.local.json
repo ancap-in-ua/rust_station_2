@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cargo build *)",
+      "Bash(cargo objcopy *)",
+      "Bash(rust-readobj --file-headers target/mips64r5900el-ps2/release/hello)",
+      "Bash(rust-readobj --sections target/mips64r5900el-ps2/release/hello)",
+      "Bash(rust-nm target/mips64r5900el-ps2/release/hello)",
+      "Bash(readelf -h target/mips64r5900el-ps2/release/hello)",
+      "Bash(readelf -S target/mips64r5900el-ps2/release/hello)",
+      "Bash(nm target/mips64r5900el-ps2/release/hello)"
+    ]
+  }
+}
