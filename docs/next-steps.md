@@ -46,8 +46,12 @@ hardware programming with no C library to crib conventions from.
 
 ## 3. Validate the target spec dynamically, not just statically
 
-Things stated as "unverified" in progress.md that should get burned down
-once something actually boots:
+`just test` now statically re-checks the ELF invariants (entry point,
+`_gp`/`_stack_top` formulas, bss) on every build — see progress.md
+2026-11-25. That only guards against *regressions* in things already
+confirmed once; it's not a substitute for #1/#2 below. Things stated as
+"unverified" in progress.md that should still get burned down once
+something actually boots:
 
 - Confirm `+noabicalls` + static relocation isn't silently relying on the
   `.got`/`_gp` setup for correctness (it's present and non-empty in the

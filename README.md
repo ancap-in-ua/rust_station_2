@@ -42,6 +42,7 @@ just build          # cargo build --release
 just run-pcsx2       # boot tools/hello in PCSX2 (pcsx2-qt under the hood)
 just size            # section sizes (cargo-binutils)
 just objdump          # disassembly (cargo-binutils)
+just test            # static checks only -- see "Testing" below
 ```
 
 PCSX2 needs a legally-obtained BIOS dump configured (first-run setup wizard,
@@ -50,6 +51,23 @@ that's on you to provide, nixpkgs obviously doesn't ship one.
 
 Cargo commands must be run from the workspace root — the linker script path
 in `.cargo/config.toml` is relative.
+
+## Testing
+
+`just test` (= `scripts/verify-elf.sh`) is a static check only: it builds
+`hello` and confirms the resulting ELF's structure (entry point,
+`_gp`/`_stack_top` formulas, bss) still matches what was manually verified
+with `readelf`/`nm` when this was scaffolded. It does **not** prove
+anything boots — that needs PCSX2 with a BIOS configured, see below.
+
+`cargo test` does not work in this workspace: `.cargo/config.toml`'s
+global `build-std = ["core"]` (required for the no-std PS2 target)
+conflicts with linking the host's prebuilt `std` that a test harness
+needs, and Cargo has no supported way to scope `build-std` to one target
+only (array config values merge across sources instead of letting an
+inner one override — confirmed, several approaches tried; see
+docs/progress.md 2026-11-25). `ps2-rt`'s pure logic is instead checked with
+`const` assertions, which run as part of the normal build.
 
 ## Why bare-metal instead of ps2sdk
 

@@ -101,6 +101,57 @@ multiple future tools, not a single specific port.
   to be corrected after actually running `nix develop` and checking.
   Confirmed working flag: `pcsx2-qt -elf <file> -fastboot`.
 
+## 2026-11-25 — automated static checks (`just test`)
+
+Still blocked on dynamic verification (next-steps.md #1 — no BIOS dump
+configured in this environment), so this burns down the "statically
+verified by hand" gap instead: turned the manual `readelf`/`nm` inspection
+from the initial scaffold into something `just test` re-checks on every
+change.
+
+- `ps2-rt/src/boot.rs`: split the bss-zeroing length arithmetic out into a
+  standalone `const fn bss_len`, checked with `const _: () = assert!(...)`
+  items (equal bounds, normal span, and the defensive save-from-underflow
+  case). Verified these actually catch regressions, not just compile: a
+  deliberately wrong expected value in one of the assertions failed the
+  build with `E0080 evaluation panicked`, as intended.
+- The MIPS-specific pieces of `boot.rs` (`global_asm!`, the `rt_start`
+  extern block, `zero_bss`) are now `#[cfg(target_arch = "mips64")]`-gated
+  so the pure arithmetic stands alone.
+- `scripts/verify-elf.sh` + `just test`: builds `hello` and asserts, from
+  `readelf -S -W`/`nm` output, the invariants progress.md previously
+  recorded as manually checked once — ELF64/MIPS/`noreorder,mips3` flags,
+  entry point `0x100000`, `_gp == end-of-.text/.rodata/.data + 0x8000`,
+  `_stack_top == 0x2000000`, `__bss_start == __bss_end`. Also verified this
+  catches real regressions: a one-character edit to `link.ld`'s `_gp`
+  formula made the script fail with a clear mismatch, and passed again
+  after reverting.
+- `.got` size is reported as an `info` line, not asserted on — its
+  non-empty size is still an open question (see known-unverified below),
+  not a settled invariant to lock in.
+
+### Why not `cargo test`
+
+Tried first, abandoned after confirming (not just suspecting) it can't
+work as the workspace is currently structured: `.cargo/config.toml` sets
+`build-std = ["core"]` globally (needed for the no-std custom PS2 target),
+and that's incompatible with linking the host's prebuilt `std` — a
+`cargo test` harness for `x86_64-unknown-linux-gnu` needs `std`, but it was
+built against a *different* `core` than the one `build-std` rebuilds from
+source for the same invocation, so linking fails with `E0152: duplicate
+lang item`. Tried to scope `build-std` to just the embedded target via
+(a) `--config unstable.build-std=[]`, (b) a `CARGO_UNSTABLE_BUILD_STD=`
+env override, (c) a nested `ps2-rt/.cargo/config.toml` with `build-std = []`,
+and (d) the same with a type-mismatched value to force a hard error instead
+of a silent no-op. All four failed: array-valued Cargo config keys *merge*
+across config sources (CLI, env, and directory layers) rather than letting
+an inner/later one replace an outer/earlier one, so `build-std` can't be
+unset short of removing it from the root config entirely — which would
+break the embedded build it exists for. `const` assertions sidestep this
+entirely (same compiler invocation as the real build, no second target, no
+`std`), at the cost of only working for pure, no-I/O logic — fine for now
+since that's all `ps2-rt` has.
+
 ### Known-unverified (stated, not swept under the rug)
 
 Everything below is plausible-but-untested. Flagging explicitly rather
