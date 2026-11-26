@@ -86,8 +86,21 @@ check_hex "_stack_top" "$stack_top" "0x2000000"
 
 check_hex "__bss_start == __bss_end (no statics expected in this tool)" "$bss_start" "$bss_end"
 
+# No dynamic linking happens in this static ELF, and no code anywhere in
+# `hello` does a $gp-relative load/store (confirmed by hand with
+# `rust-objdump -d`, see docs/progress.md 2026-11-26) -- so the only
+# things that should turn up are (a) zero relocations and (b) a `.got`
+# containing exactly the MIPS psABI's two mandatory reserved header
+# entries (GOT[0] = 0, GOT[1] = 0x8000000000000000), not anything
+# generated code actually consumes.
+check "relocations" "$(readelf -r "$elf" | grep -v '^$')" "There are no relocations in this file."
+
 got_size="$(awk '$2 == ".got" {print "0x"$6}' <<<"$sections")"
-echo "info  .got size: ${got_size:-<absent>} (non-empty is expected-but-unexplained, see README known caveats)"
+check_hex ".got size (psABI's 2 reserved header entries only)" "$got_size" "0x10"
+
+got_bytes="$(readelf -x .got "$elf" | awk '$1 ~ /^0x/ {print $2, $3, $4, $5}')"
+check ".got content (reserved header: 0, then 0x8000000000000000)" \
+    "$got_bytes" "00000000 00000000 00000000 00000080"
 
 if [[ "$fail" -ne 0 ]]; then
     echo "verify-elf: FAILED" >&2

@@ -53,9 +53,6 @@ confirmed once; it's not a substitute for #1/#2 below. Things stated as
 "unverified" in progress.md that should still get burned down once
 something actually boots:
 
-- Confirm `+noabicalls` + static relocation isn't silently relying on the
-  `.got`/`_gp` setup for correctness (it's present and non-empty in the
-  built ELF — find out why, and whether it matters).
 - Narrow `max-atomic-width` to whatever the R5900 actually supports if
   any tool ends up needing atomics.
 - If floating point correctness ever matters for a ported tool, write a

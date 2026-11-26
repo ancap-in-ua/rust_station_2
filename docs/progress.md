@@ -160,12 +160,42 @@ than implying it's been checked:
 - Whether PCSX2 (or real hardware) actually boots `hello` and the magic
   value lands at `0x1000` — the ELF structure was statically verified,
   not dynamically run under an emulator/debugger yet.
-- Whether `+noabicalls` really results in zero `$gp`-relative codegen for
-  n64 — the `.got` section is still present and non-empty (16 bytes) in
-  the built ELF, so something is still using it; the `_gp` setup in
-  `boot.rs` turned out to not be just defensive paranoia.
 - `max-atomic-width: 32` — picked conservatively, not confirmed against
   R5900 documentation for which atomic widths it actually implements.
 - Exact FPU rounding/exception behavior under `+single-float` — declared
   to match "hardware has single precision, no double", not validated
   against the EE's documented non-IEEE-754 quirks.
+
+## 2026-11-26 — resolved: why `.got` is non-empty under `+noabicalls`
+
+Still no BIOS dump in this environment, so dynamic boot verification
+(next-steps.md #1) stays blocked. This burns down one of the
+known-unverified items from 2026-11-25 instead, since it's answerable
+statically.
+
+Checked `hello`'s built ELF directly:
+
+- `readelf -r`: "There are no relocations in this file." — fully static,
+  nothing left to resolve at load time.
+- `rust-objdump -d`: `$gp` is written exactly twice, both in `_start`'s
+  prologue (`lui`/`addiu` to compute it from `_gp`), and never read back
+  as a base register anywhere in the disassembly — zero `$gp`-relative
+  loads/stores in the whole binary.
+- `readelf -x .got`: exactly 16 bytes — `0x0000000000000000` followed by
+  `0x8000000000000000`.
+
+That second value is the tell: it's the MIPS psABI's two *mandatory*
+reserved GOT header entries (GOT[0] reserved for a lazy-resolution stub
+address, zero here since there's no dynamic linker; GOT[1] with its sign
+bit set, the ABI's "not lazily bound" marker) — emitted by the linker
+unconditionally whenever a `.got` output section exists at all, not
+something generated code asked for. Combined with zero relocations and
+zero `$gp`-relative accesses, this confirms `+noabicalls` is doing
+exactly what it's documented to do: the `.got`/`_gp` setup in `boot.rs`
+really is pure defensive boilerplate for this binary, not something
+silently load-bearing.
+
+Turned this into a regression check rather than leaving it as a one-time
+reading: `scripts/verify-elf.sh` now asserts zero relocations and the
+exact 16-byte/known-content `.got`, instead of only reporting its size as
+an `info` line.
