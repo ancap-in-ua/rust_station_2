@@ -258,3 +258,116 @@ produce anything on a real display. Scoped deliberately narrow — see
 - Everything in `gs.rs` is unused by any tool so far — no binary calls
   `write_reg` yet, so none of this has even been linked into a built ELF,
   let alone run.
+
+## 2026-11-26 — primary-source PCRTC registers + the real sync-timing answer
+
+Follow-up to the same day's earlier entry, asked to source the video
+sync-timing constants specifically from the EE Users Manual. That source
+turned out not to have them — tracked down what actually does, which
+changed the plan rather than just filling in the blanks.
+
+### Where the primary sources actually live, and what's in each
+
+Pulled both manuals (Sony, 2002, "SCE Confidential") from
+[DarrenRainey/PS2-Programming-Docs](https://github.com/DarrenRainey/PS2-Programming-Docs),
+converted to text with `pdftotext -layout` to search them directly
+rather than relying on secondary sources:
+
+- **EE Users Manual v6.0**, section 2.2.3 "GS Privileged Registers":
+  only an address table (confirms the `0x1200_00xx` addresses already in
+  `gs.rs`, nothing more). No bit layouts, no timing values — `grep -i
+  pcrtc` on the extracted text matches exactly once, the words "Various
+  PCRTC modes" in that same address table. The PCRTC register
+  *definitions* live in a different manual entirely.
+- **GS Users Manual v6.0**, chapter 5 "CRTC": this is the real source.
+  Confirmed, by reading the actual `BIT ASSIGN`/`FIELD` tables (not
+  inferring from ps2sdk macro names):
+  - `PMODE`, `BGCOLOR`, `DISPFB1`/`DISPFB2`, `DISPLAY1`/`DISPLAY2`'s bit
+    layouts match `gs.rs`'s `pmode`/`bgcolor`/`dispfb`/`display` exactly
+    — every field position and width. `gs.rs`'s module doc now cites
+    this directly instead of "not yet checked against the primary
+    source."
+  - The Merge Circuit's actual blend equation (section 5.2.3): `Ro = Rs
+    × A + Rd × (0xff − A)` (and same for G/B), where `Rs`/etc. is circuit
+    1's output, `Rd`/etc. is circuit 2's output or `BGCOLOR` (selected by
+    `SLBG`), and `A` is either circuit 1's alpha or the fixed `PMODE.ALP`
+    value (selected by `MMOD`). With `MMOD=1` and `ALP=0`, `A=0`, so
+    `Ro=Rd` — **confirms** the previous entry's PMODE-blend hypothesis
+    outright, not just "promising."
+  - Section 5.2.1 "Video Clock" states outright: "the VCK frequency
+    predetermined for each video mode is set by **the kernel service**."
+    This is the actual answer to "source the NTSC sync timing constants"
+    — they're not meant to be hand-derived or hand-set by application
+    code at all; a BIOS kernel call does it.
+
+### The kernel service, and why that's a better answer than raw constants
+
+[ps2tek](https://psi-rockin.github.io/ps2tek/)'s BIOS EE Syscalls
+reference: syscall `0x02`, `void SetGsCrt(bool interlaced, int
+display_mode, bool frame)`, "Initializes the PCRTC." Cross-checked
+against ps2sdk:
+
+- `ee/kernel/include/syscallnr.h`: `__NR_SetGsCrt` = 2, confirming the
+  number.
+- `ee/kernel/src/kernel.S`: the non-kmode `SYSCALL_SPECIAL` stub is
+  exactly `li $3, N; syscall; jr $31; nop` — args already sit in
+  `$a0`-`$a2` by the ordinary calling convention, so the whole function
+  body is those four instructions.
+- `ee/graph/src/graph_mode.c`'s `graph_set_mode`: confirms argument
+  order and meaning (`SetGsCrt(interlace, graph_mode[mode].mode,
+  ffmd)`), and `ee/graph/include/graph.h`'s `GRAPH_MODE_NTSC`=1/`_PAL`=2/
+  `_INTERLACED`=1/`_NONINTERLACED`=0/`_FIELD`=0/`_FRAME`=1.
+
+Implemented as `ps2_rt::syscall::set_gs_crt` (`ps2-rt/src/syscall.rs`):
+the raw 4-instruction stub via `global_asm!` (same pattern as
+`boot.rs`'s `_start`), an `extern "C"` declaration, and the mode
+constants. This is a materially better outcome than what was asked for:
+rather than fabricating/guessing `SMODE1`/`SYNCH1`/`SYNCH2`/`SYNCV`
+register values (which the primary source explicitly says isn't how
+application code is supposed to arrive at them), the real hardware
+design delegates that entirely to a one-line BIOS call.
+
+### Wired into an actual tool, and checked structurally
+
+Added `tools/solid-color`, a full (static-only) implementation of the
+PMODE-blend hypothesis: calls `set_gs_crt(NON_INTERLACED, NTSC, FIELD)`,
+then writes `DISPFB1`/`DISPLAY1` (ps2sdk's own `graph_mode[NTSC]` preset
+— `{x:652, y:26, width:2560, height:224}` from `graph_mode.c` — run
+through its documented `graph_set_screen`/`graph_set_framebuffer`
+formulas for a non-interlaced 640×224 PSMCT32 screen, not hand-derived),
+`BGCOLOR` (red), and finally `PMODE` to enable the forced-background
+blend.
+
+This is where the "unused by any tool" gap from the previous entry
+actually got closed, and with it, something real to check:
+
+- `set_gs_crt` now appears in `solid-color`'s linked ELF (confirmed with
+  `nm` — it's absent from `hello`'s, correctly GC'd there since nothing
+  references it, same as `gs.rs`'s functions still are).
+- `scripts/verify-solid-color.sh`: asserts the compiled `set_gs_crt`
+  symbol's raw bytes equal the hand-assembled stub exactly
+  (`02000324 0c000000 0800e003 00000000`, i.e. `li $3,2 / syscall / jr
+  $31 / nop`). Checked this actually catches a regression, not just
+  compiles: changed the syscall number to 3 in the source, rebuilt,
+  watched it fail with a clear byte mismatch, reverted, watched it pass
+  again.
+- `tools/solid-color/src/main.rs` names every magic number from the
+  `graph_mode[NTSC]` preset and `const`-asserts the four packed register
+  values they produce (`DISPFB1`/`DISPLAY1`/`BGCOLOR`/`PMODE`). Checked
+  the same way: broke `DISPFB1`'s expected value by one, rebuilt, saw
+  `E0080` fail the build, reverted. Deliberately *not* done by scanning
+  compiled instruction bytes for these — that location is compiler-choice-
+  dependent (register allocation, immediate materialization strategy)
+  and would be testing LLVM's codegen decisions, not the actual claim.
+- `scripts/verify-elf.sh` runs against `solid-color` too now (it was
+  already generic enough — no changes needed) and `just test` runs all
+  three checks.
+
+### Still not run anywhere
+
+Same caveat as every entry today: no BIOS dump in this environment, so
+none of this has been dynamically confirmed. What's checked is
+internal consistency (the numbers match their stated formulas, the
+hand-written assembly matches what was intended) and consistency with
+secondary sources (ps2sdk) that are themselves known-working — not "the
+screen turns red." That's still gated on next-steps.md #1.

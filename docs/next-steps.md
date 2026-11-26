@@ -23,33 +23,47 @@ doesn't:
 - Suspect `$gp`/`$sp` setup in `ps2-rt/src/boot.rs` first — that's the
   least-tested part of the boot path.
 
+Once `hello` is confirmed, run `just run-pcsx2 solid-color` to check #2
+below.
+
 ## 2. Minimal GS output — the real first milestone
 
 `hello` currently proves nothing visible. The first milestone that
 actually exercises boot correctness, `$sp`/`$gp` setup, and bss zeroing
-end-to-end is: **get a solid color on screen.** Progress so far (see
-progress.md 2026-11-26): GS privileged register addresses/bit-packing
-are implemented in `ps2-rt/src/gs.rs`, sourced from ps2sdk, and the
-"how does the EE even address `0x12000000`" question from the previous
-version of this doc is answered (identity-mapped, no segment prefix
-needed) — but nothing has been wired up into a tool or run. What's left:
+end-to-end is: **get a solid color on screen.** As of progress.md
+2026-11-26 (both entries), this is *implemented*, sourced, and
+statically checked (`tools/solid-color`, `ps2-rt/src/gs.rs`,
+`ps2-rt/src/syscall.rs`, `scripts/verify-solid-color.sh`) — what's left
+is entirely #1: nothing here has run anywhere.
 
-- Source real NTSC/PAL video-timing constants for `SMODE1`/`SYNCH1`/
-  `SYNCH2`/`SYNCHV` — not guessable, needs the EE/GS Users Manual or a
-  known-working reference (ps2sdk video-mode preset), not fabricated.
-- Verify the PCRTC blend-equation hypothesis in progress.md (using
-  `PMODE`'s `MMOD`/`SLBG`/`ALP=0` to force the whole display to
-  `BGCOLOR`, skipping DMA/GIF entirely) against the GS Users Manual's
-  actual blend equation — it's currently inferred from field semantics,
-  not confirmed.
-- If that hypothesis holds, a solid-color tool needs no GIF/DMA at all;
-  if it doesn't, fall back to the original plan: issue a DMA transfer
-  with a GIF packet to push an actual primitive (even a full-screen
-  rectangle) to the GS. The latter is real hardware programming with no
-  C library to crib conventions from — budget real time for it.
-- Either way, this still needs #1 (an actual BIOS/PCSX2 run) to confirm
-  anything beyond "it compiles and the addresses match a secondary
-  source."
+What got resolved along the way, so it's not re-litigated:
+
+- "How does the EE even address `0x12000000`?" — identity-mapped, no
+  segment prefix needed (confirmed against ps2tek's EE memory map).
+- "Where do NTSC/PAL sync-timing constants come from?" — they don't;
+  the GS Users Manual says that's a BIOS kernel service
+  (`ps2_rt::syscall::set_gs_crt`, BIOS syscall `0x02`), not something
+  application code hand-derives. Sourced from ps2tek + ps2sdk, and the
+  compiled stub's raw bytes are checked against the hand-assembled
+  expectation in `scripts/verify-solid-color.sh`.
+- PMODE/BGCOLOR/DISPFB/DISPLAY's bit layouts and the PCRTC blend
+  equation — confirmed against the GS Users Manual directly (not just
+  ps2sdk macro names), so the "force the whole display to `BGCOLOR` via
+  `MMOD`/`SLBG`/`ALP=0`, skipping GIF/DMA entirely" approach is no longer
+  a hypothesis.
+
+What's actually still open:
+
+- Run it. Until #1 is unblocked (a BIOS dump), there is no way to tell
+  whether `solid-color` really shows red, or hangs, or shows something
+  else — everything checked so far is internal consistency (the numbers
+  match their stated formulas) and consistency with ps2sdk, not a
+  hardware/emulator result.
+- If it turns out *not* to work once run, the fallback is the original
+  plan: issue a DMA transfer with a GIF packet to push an actual
+  primitive (even a full-screen rectangle) to the GS. That's real
+  hardware programming with no C library to crib conventions from —
+  budget real time for it if it comes to that.
 
 ## 3. Validate the target spec dynamically, not just statically
 

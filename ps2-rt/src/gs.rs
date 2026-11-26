@@ -1,17 +1,24 @@
 //! GS privileged registers (PCRTC: the display-output side of the Graphics
 //! Synthesizer), addresses and bit layouts only -- no driving logic yet.
 //!
-//! Source for every address and bit field below: ps2sdk's
-//! `common/include/gs_privileged.h` (the `GS_REG_*` addresses and
-//! `GS_SET_*` bit-packing macros), cross-checked against the privileged
-//! register address table in ps2tek
-//! (<https://psi-rockin.github.io/ps2tek/>). Not yet checked against the
-//! primary source (EE Users Manual/GS Users Manual) -- see
+//! Source for every address and bit field below: the primary source,
+//! Sony's GS User's Manual Version 6.0 ("Privileged Registers" address
+//! list in section 7.3, and the per-register `BIT ASSIGN`/`FIELD` tables
+//! for `PMODE`, `BGCOLOR`, `DISPFB1/2`, `DISPLAY1/2` -- `0x00`/`0x0e`/
+//! `0x07`/`0x08` in GS-register-address terms, `0x1200_0000`/`0x1200_00e0`/
+//! `0x1200_0070`/`0x1200_0080` in EE-physical-address terms). Cross-checked
+//! against ps2sdk's `common/include/gs_privileged.h` (`GS_REG_*`/
+//! `GS_SET_*`) and ps2tek's (<https://psi-rockin.github.io/ps2tek/>)
+//! privileged-register address table -- all three agree. See
 //! docs/progress.md 2026-11-26.
 //!
 //! These are plain memory-mapped registers, not GS *drawing* state (that
 //! goes through the GIF via DMA/direct FIFO writes and is unimplemented
-//! here -- see docs/next-steps.md #2).
+//! here -- see docs/next-steps.md #2). They also don't cover video
+//! sync/clock timing (`SMODE1`/`SYNCH1`/`SYNCH2`/`SYNCV`/`SRFSH`) --
+//! the primary source documents those as configured by a BIOS kernel
+//! service rather than as registers application code hand-derives
+//! values for; see `ps2_rt::syscall::set_gs_crt`.
 //!
 //! No address translation needed: the EE's virtual/physical memory map
 //! has this entire region (0x10000000-0x13FFFFFF: I/O registers, VU0/VU1
@@ -111,12 +118,14 @@ pub const fn display(dx: u16, dy: u16, mag_h: u8, mag_v: u8, width: u16, height:
         | (height as u64 & 0x7ff) << 44
 }
 
-// Checked against ps2sdk's GS_SET_PMODE/GS_SET_BGCOLOR macro expansions
-// by hand (see gs_privileged.h), not against hardware -- no BIOS dump
-// available in this environment to boot anything that could confirm
-// these bit positions actually do what ps2sdk's doc comments say they
-// do. Regressions in the *arithmetic* (wrong shift/mask) are still worth
-// catching now; see docs/next-steps.md for what's still unverified.
+// Bit positions themselves are now checked against the primary source
+// (GS User's Manual's BIT ASSIGN/FIELD tables, see the module doc
+// comment) by hand, not against hardware -- no BIOS dump available in
+// this environment to boot anything that could confirm these registers
+// actually drive the PCRTC the way the manual says they do. Regressions
+// in the *arithmetic* below (a wrong shift/mask creeping in later) are
+// still worth catching now; see docs/next-steps.md for what's still
+// unverified.
 // CRTMD is hardwired to 1, contributing 1 << 2 = 4 to every value below
 // -- included explicitly rather than folded into "baseline" so a future
 // edit can't silently drop it without a visible assertion failure.

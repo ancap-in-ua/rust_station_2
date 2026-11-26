@@ -3,6 +3,7 @@
 
 mod boot;
 pub mod gs;
+pub mod syscall;
 
 use core::panic::PanicInfo;
 

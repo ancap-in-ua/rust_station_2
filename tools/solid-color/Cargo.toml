@@ -1,0 +1,11 @@
+[package]
+name = "solid-color"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+ps2-rt = { path = "../../ps2-rt" }
+
+[[bin]]
+name = "solid-color"
+path = "src/main.rs"

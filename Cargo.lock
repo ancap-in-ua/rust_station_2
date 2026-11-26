@@ -12,3 +12,10 @@ dependencies = [
 [[package]]
 name = "ps2-rt"
 version = "0.1.0"
+
+[[package]]
+name = "solid-color"
+version = "0.1.0"
+dependencies = [
+ "ps2-rt",
+]
