@@ -2,6 +2,7 @@
 #![feature(asm_experimental_arch)]
 
 mod boot;
+pub mod gs;
 
 use core::panic::PanicInfo;
 

@@ -27,22 +27,29 @@ doesn't:
 
 `hello` currently proves nothing visible. The first milestone that
 actually exercises boot correctness, `$sp`/`$gp` setup, and bss zeroing
-end-to-end is: **get a solid color on screen.** This means:
+end-to-end is: **get a solid color on screen.** Progress so far (see
+progress.md 2026-11-26): GS privileged register addresses/bit-packing
+are implemented in `ps2-rt/src/gs.rs`, sourced from ps2sdk, and the
+"how does the EE even address `0x12000000`" question from the previous
+version of this doc is answered (identity-mapped, no segment prefix
+needed) — but nothing has been wired up into a tool or run. What's left:
 
-- Writing GS privileged registers (memory-mapped, physical base
-  `0x12000000`) to configure a basic framebuffer / display mode.
-- Understanding how the EE addresses that region from kernel mode on
-  boot (likely an uncached segment, analogous to MIPS `kseg1` — the exact
-  bit-pattern for R5900's 64-bit address segments was *not* worked out
-  during the initial scaffold; this is real research, not a known
-  quantity to just copy in).
-- Issuing a DMA transfer with a GIF packet to actually push a primitive
-  (even a full-screen rectangle) to the GS.
-
-This is genuinely nontrivial embedded/hardware work — budget real time
-for it, and expect to lean on PS2 hardware references (EE Users Manual,
-GS Users Manual) rather than Rust-specific resources, since this is pure
-hardware programming with no C library to crib conventions from.
+- Source real NTSC/PAL video-timing constants for `SMODE1`/`SYNCH1`/
+  `SYNCH2`/`SYNCHV` — not guessable, needs the EE/GS Users Manual or a
+  known-working reference (ps2sdk video-mode preset), not fabricated.
+- Verify the PCRTC blend-equation hypothesis in progress.md (using
+  `PMODE`'s `MMOD`/`SLBG`/`ALP=0` to force the whole display to
+  `BGCOLOR`, skipping DMA/GIF entirely) against the GS Users Manual's
+  actual blend equation — it's currently inferred from field semantics,
+  not confirmed.
+- If that hypothesis holds, a solid-color tool needs no GIF/DMA at all;
+  if it doesn't, fall back to the original plan: issue a DMA transfer
+  with a GIF packet to push an actual primitive (even a full-screen
+  rectangle) to the GS. The latter is real hardware programming with no
+  C library to crib conventions from — budget real time for it.
+- Either way, this still needs #1 (an actual BIOS/PCSX2 run) to confirm
+  anything beyond "it compiles and the addresses match a secondary
+  source."
 
 ## 3. Validate the target spec dynamically, not just statically
 

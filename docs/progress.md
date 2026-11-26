@@ -199,3 +199,62 @@ Turned this into a regression check rather than leaving it as a one-time
 reading: `scripts/verify-elf.sh` now asserts zero relocations and the
 exact 16-byte/known-content `.got`, instead of only reporting its size as
 an `info` line.
+
+## 2026-11-26 — GS privileged register plumbing (next-steps.md #2, partial)
+
+Still blocked on #1 (no BIOS), so this is necessarily all static: code
+that's internally consistent and sourced, not dynamically confirmed to
+produce anything on a real display. Scoped deliberately narrow — see
+"what's still missing" below before treating this as the milestone.
+
+### What was researched (sourced, not guessed)
+
+- EE virtual/physical memory map, via
+  [ps2tek](https://psi-rockin.github.io/ps2tek/): unlike main RAM (which
+  has separate cached/uncached kseg0/kseg1-style aliases), the
+  `0x10000000`-`0x13FFFFFF` region (I/O registers, VU0/VU1 memory, GS
+  privileged registers) is identity-mapped — virtual address equals
+  physical address directly, reachable from kuseg with no segment
+  prefix. This resolves the exact open question
+  next-steps.md previously posed ("the exact bit-pattern for R5900's
+  64-bit address segments was not worked out") for this specific address
+  range: no translation helper is needed, a plain pointer write to
+  `0x12000000` is correct as-is (assuming kernel-mode execution, which
+  the BIOS/ELF loader is responsible for — not re-verified here).
+- GS privileged register addresses and bit layouts, from ps2sdk's
+  `common/include/gs_privileged.h` (`GS_REG_*`/`GS_SET_*`), cross-checked
+  against ps2tek's privileged-register address table. Implemented in the
+  new `ps2-rt/src/gs.rs`: `REG_PMODE`/`REG_SMODE2`/`REG_DISPFB1`/
+  `REG_DISPLAY1`/`REG_DISPFB2`/`REG_DISPLAY2`/`REG_BGCOLOR` address
+  constants, plus `pmode`/`bgcolor`/`dispfb`/`display` — `const fn`
+  bit-packing helpers mirroring ps2sdk's `GS_SET_*` macros.
+- A possible shortcut for next-steps.md #2's "get a solid color on
+  screen" milestone that avoids needing the GIF/DMA primitive-draw path
+  entirely: PMODE's blend fields (`MMOD` = use a fixed alpha instead of
+  circuit 1's per-pixel alpha, `SLBG` = blend against `BGCOLOR` instead
+  of circuit 2, `ALP` = the fixed alpha value, 0xff = 1.0) mean
+  `pmode(en1: true, en2: false, use_fixed_alpha: true,
+  out1_alpha_from_out2: false, select_bgcolor: true, alpha: 0)` should
+  make the *entire* PCRTC output equal to `BGCOLOR`, regardless of
+  whatever (even garbage/uninitialized) data sits in circuit 1's
+  framebuffer — no VRAM write, no GS primitive, no GIF/DMA needed at
+  all. This is a hypothesis built from the field semantics, not
+  something confirmed against the primary source (GS Users Manual's
+  PCRTC blend-equation section) or run anywhere. Flagging it as
+  promising, not as done.
+
+### What's still missing before attempting to boot this
+
+- Video sync timing: `SMODE1`/`SYNCH1`/`SYNCH2`/`SYNCHV` need real
+  NTSC/PAL timing constants (scanline counts, blanking intervals, pixel
+  clock dividers) that are empirically-tuned hardware values, not
+  something to derive from first principles. Not sourced yet — ps2tek's
+  public docs don't tabulate them, so this needs the EE/GS Users Manual
+  directly or a close reading of a known-working ps2sdk video-mode
+  preset. Deliberately not guessed/fabricated here.
+- The PCRTC blend-equation hypothesis above, against the GS Users
+  Manual's actual equation (not just field-name semantics pulled from
+  secondary sources).
+- Everything in `gs.rs` is unused by any tool so far — no binary calls
+  `write_reg` yet, so none of this has even been linked into a built ELF,
+  let alone run.
