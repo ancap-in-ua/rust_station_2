@@ -8,7 +8,7 @@ target = "targets/mips64r5900el-ps2.json"
 # them from source. This requires the nightly toolchain pinned in
 # rust-toolchain.toml (it is picked up automatically by rustup).
 [unstable]
-build-std = ["core"]
+build-std = ["core", "alloc"]
 build-std-features = ["compiler-builtins-mem"]
 json-target-spec = true
 

@@ -10,7 +10,11 @@
 # relative section layout.
 set -euo pipefail
 
-elf="${1:?usage: verify-elf.sh <path-to-elf>}"
+elf="${1:?usage: verify-elf.sh <path-to-elf> [expected-bss-size]}"
+# Most tools so far have no statics, so bss is empty by default; tools
+# that do (e.g. `alloc-hello`, backed by ps2_rt::heap's static HEAP
+# array) pass their expected __bss_end - __bss_start here instead.
+expected_bss_size="${2:-0}"
 
 if ! command -v readelf >/dev/null || ! command -v nm >/dev/null; then
     echo "verify-elf: readelf and nm (binutils) are required" >&2
@@ -84,7 +88,7 @@ check_hex "_gp (== end of .text/.rodata/.data + 0x8000)" "$gp" "$want_gp"
 # link.ld: 32 MiB RAM, 1 MiB reserved at the bottom for BIOS/kernel.
 check_hex "_stack_top" "$stack_top" "0x2000000"
 
-check_hex "__bss_start == __bss_end (no statics expected in this tool)" "$bss_start" "$bss_end"
+check_hex "bss size (__bss_end - __bss_start)" "$((bss_end - bss_start))" "$expected_bss_size"
 
 # No dynamic linking happens in this static ELF, and no code anywhere in
 # `hello` does a $gp-relative load/store (confirmed by hand with

@@ -24,7 +24,9 @@ doesn't:
   least-tested part of the boot path.
 
 Once `hello` is confirmed, run `just run-pcsx2 solid-color` to check #2
-below.
+below, and `just run-pcsx2 alloc-hello` to check #4's allocator (watch
+for `0xA110_0000 | 140` = `0xA110008C` at `0x1000`, same proof-of-life
+pattern as `hello`).
 
 ## 2. Minimal GS output — the real first milestone
 
@@ -82,14 +84,24 @@ something actually boots:
   declares `+single-float` but the EE's documented non-compliance hasn't
   been checked against actual LLVM codegen.
 
-## 4. Pick the second tool to port
+## 4. Pick the second tool to port — done for `alloc`, see progress.md 2026-11-26
 
-The workspace is structured for multiple tools (`tools/<name>/`) but only
-has the one placeholder. Once GS output exists, a reasonable second
-target is something that exercises `alloc` (the target spec currently
-only builds `core` via `build-std` — adding a simple bump/freelist
-allocator in `ps2-rt` and switching `build-std = ["core", "alloc"]` would
-be a prerequisite for anything beyond the most trivial no-heap tool).
+`ps2_rt::heap` now provides a `#[global_allocator]` (a bump allocator
+backed by a fixed 64 KiB static array — intentionally not a
+freelist, and intentionally not sized from `link.ld`'s
+`_heap_start`/`_stack_top` gap, since deciding how much of the
+remaining RAM is safe to hand to the heap vs. leave as stack headroom
+isn't something to guess), and `tools/alloc-hello` exercises it. Like
+everything else, this is statically checked (`just test` — including a
+bss-size check now that this is the first tool with non-empty `.bss`)
+but not dynamically run (#1).
+
+64 KiB was picked as "clearly enough for a `Vec<u32>` of 8 elements,
+clearly not so much it's a real resource decision" — revisit if a
+future tool's actual allocation needs make that the wrong default, and
+consider whether a freelist becomes necessary once something frees
+memory in a loop (a pure bump allocator will exhaust the 64 KiB fast
+under that pattern).
 
 ## 5. Real hardware deployment (lower priority, deliberately deferred)
 

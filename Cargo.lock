@@ -3,6 +3,13 @@
 version = 4
 
 [[package]]
+name = "alloc-hello"
+version = "0.1.0"
+dependencies = [
+ "ps2-rt",
+]
+
+[[package]]
 name = "hello"
 version = "0.1.0"
 dependencies = [

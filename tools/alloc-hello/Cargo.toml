@@ -1,0 +1,11 @@
+[package]
+name = "alloc-hello"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+ps2-rt = { path = "../../ps2-rt" }
+
+[[bin]]
+name = "alloc-hello"
+path = "src/main.rs"

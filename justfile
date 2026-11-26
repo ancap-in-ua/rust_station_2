@@ -31,3 +31,6 @@ test: build
     ./scripts/verify-elf.sh target/mips64r5900el-ps2/release/hello
     ./scripts/verify-elf.sh target/mips64r5900el-ps2/release/solid-color
     ./scripts/verify-solid-color.sh target/mips64r5900el-ps2/release/solid-color
+    # alloc-hello's bss isn't empty: ps2_rt::heap's static HEAP (64 KiB)
+    # plus BumpAllocator's `next` cursor (one usize, 8 bytes).
+    ./scripts/verify-elf.sh target/mips64r5900el-ps2/release/alloc-hello "$((64 * 1024 + 8))"

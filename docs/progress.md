@@ -371,3 +371,52 @@ internal consistency (the numbers match their stated formulas, the
 hand-written assembly matches what was intended) and consistency with
 secondary sources (ps2sdk) that are themselves known-working — not "the
 screen turns red." That's still gated on next-steps.md #1.
+
+## 2026-11-26 — `alloc` support (next-steps.md #4)
+
+\#1 and #2 are now both entirely blocked on getting a BIOS dump into
+this environment — nothing left to do there without one. #4 ("pick the
+second tool to port... something that exercises `alloc`") isn't blocked
+on that, so moved to it instead.
+
+- `.cargo/config.toml`: `build-std = ["core", "alloc"]` (was just
+  `["core"]`). Built cleanly on the pinned nightly (`1.102.0-nightly
+  (137d1d494 2026-11-22)`) with no `#[alloc_error_handler]` needed —
+  checked by actually building with none defined rather than assuming;
+  this nightly provides a default one. Worth re-checking if the
+  toolchain pin ever moves, the same way `panic_immediate_abort` broke
+  across a nightly boundary (see 2026-11-23's bug log).
+- `ps2-rt/src/heap.rs`: a bump allocator (`#[global_allocator]`) backed
+  by a fixed 64 KiB `static` array, not a region carved out of `link.ld`
+  between `_heap_start` and `_stack_top` — deliberately avoids having to
+  decide how much of the remaining RAM is safe to give the heap vs.
+  leave as stack headroom, which isn't something to size from first
+  principles. `dealloc` is a no-op (bump allocators don't reclaim
+  individual allocations); next-steps.md already flagged this as an
+  acceptable simplification over a freelist.
+- `tools/alloc-hello`: builds a `Vec<u32>`, sums values derived from
+  actually allocated/written memory (not a hardcoded constant — a
+  broken allocator returning garbage or aliased memory would plausibly
+  change the result), writes it to the same proof-of-life address
+  pattern as `hello`.
+- This is the **first tool with non-empty `.bss`** (`HEAP` plus the
+  allocator's `next` cursor, 64 KiB + 8 bytes). Every tool before this
+  one had `__bss_start == __bss_end`, so `boot.rs`'s `zero_bss()` was
+  only ever exercised as a zero-length no-op — this is the first ELF
+  where it actually has bytes to zero. Confirmed via `nm`: `HEAP` and
+  `ALLOCATOR`'s inner cursor both land in `.bss`, sized exactly as
+  expected (0x10008 = 0x10000 + 8).
+- `scripts/verify-elf.sh`'s bss check was hard-coded to assume
+  `__bss_start == __bss_end` for every tool — no longer true, so it now
+  takes an optional expected-size argument (default 0, so `hello`/
+  `solid-color` need no changes) instead of assuming equality. Checked
+  it still catches a real mismatch (passed a wrong size by hand, saw it
+  fail with the actual vs. expected values, removed the override).
+- `heap.rs`'s `align_up` is const-asserted the same way `boot.rs`'s
+  `bss_len` and `gs.rs`'s bit-packing functions are — checked these
+  assertions aren't vacuous (broke one, rebuilt, saw `E0080`, reverted).
+
+Same caveat as everything else today: builds and link-time facts
+(symbol presence, section sizes) are checked; whether the allocator
+actually produces correct, non-aliasing pointers on real EE hardware is
+not — that's gated on next-steps.md #1 like everything else.

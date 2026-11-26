@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["ps2-rt", "tools/hello", "tools/solid-color"]
+members = ["ps2-rt", "tools/hello", "tools/solid-color", "tools/alloc-hello"]
 
 # Required because the target spec hard-codes "panic-strategy": "abort" and
 # core is built without unwinding support for this target.
