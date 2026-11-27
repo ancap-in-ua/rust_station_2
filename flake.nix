@@ -24,12 +24,17 @@
         packages = with pkgs; [
           cargo-binutils # cargo objdump / nm / size, via llvm-tools-preview
           pcsx2 # emulator, for fast iteration
-          gdb # can attach to PCSX2's gdbstub or a real-hardware target
+          # qemu-system-mips64el: not a PS2, but it needs no BIOS dump, so
+          # it's the only way anything here gets *executed* in this
+          # environment rather than just inspected -- see
+          # scripts/lib-qemu.sh. `just test-qemu` depends on it.
+          qemu
+          gdb # drives the qemu/PCSX2 gdbstubs; also real-hardware targets
           just
         ];
 
         shellHook = ''
-          echo "ps2-rust-dev shell: pcsx2, cargo-binutils, gdb, just available."
+          echo "ps2-rust-dev shell: pcsx2, qemu, cargo-binutils, gdb, just available."
           echo "Rust itself comes from rustup via rust-toolchain.toml."
         '';
       };

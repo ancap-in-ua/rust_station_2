@@ -4,29 +4,42 @@ Ordered roughly by what unblocks the most follow-on work. See
 [progress.md](progress.md) for what's already in place and what's been
 verified vs. just assumed.
 
-## 1. Actually run `hello` under PCSX2 (highest priority)
+## 1. Run it on something that is actually a PS2 (highest priority)
 
-Nothing has been dynamically executed yet — only statically inspected via
-`readelf`/`nm`. This needs a legally-obtained PS2 BIOS dump, which isn't
-something this repo or the flake can provide; run
-`pcsx2-qt -setupwizard` once to configure one, then:
+**Partly done as of progress.md 2026-11-27** — read that entry before
+picking this up, because what's left is now much narrower than it was.
+
+`just test-qemu` executes the unmodified release ELFs under
+`qemu-system-mips64el`, which needs no BIOS dump. That settled everything
+CPU- and RAM-level: `_start`'s assembly runs, `$gp`/`$sp` come out
+matching `link.ld`, `zero_bss` genuinely zeroes bss (checked
+non-vacuously, by dirtying it before boot), the bump allocator hands out
+usable non-aliasing memory, and both proof-of-life values land where the
+README says they do. "Suspect `$gp`/`$sp` setup first" is no longer the
+right advice — that path is now the *best*-tested part of the boot
+sequence, not the least.
+
+What qemu cannot touch, and therefore what this item is now *only*
+about: the GS, BIOS syscalls, and anything R5900-specific (MMI, the
+non-IEEE FPU, scratchpad, cache). See the end of progress.md 2026-11-27,
+or the header of `scripts/lib-qemu.sh`, for the exhaustive list. A green
+`just test-qemu` is not evidence that anything works on a PS2.
+
+So this still needs a legally-obtained PS2 BIOS dump, which isn't
+something this repo or the flake can provide. Run `pcsx2-qt -setupwizard`
+once to configure one, then:
 
 ```
-just run-pcsx2
+just run-pcsx2 solid-color
 ```
 
-Check the magic value (`0xC0FFEE42`) landed at RAM address `0x1000` via
-PCSX2's memory viewer (Debug menu) or `gdb` against its gdbstub. If it
-doesn't:
-- Check whether PCSX2 even reaches the entry point (`-debugger` flag
-  breaks on entry).
-- Suspect `$gp`/`$sp` setup in `ps2-rt/src/boot.rs` first — that's the
-  least-tested part of the boot path.
-
-Once `hello` is confirmed, run `just run-pcsx2 solid-color` to check #2
-below, and `just run-pcsx2 alloc-hello` to check #4's allocator (watch
-for `0xA110_0000 | 140` = `0xA110008C` at `0x1000`, same proof-of-life
-pattern as `hello`).
+and see whether the screen turns red (#2). If it doesn't, the thing to
+suspect is the PMODE-blend hypothesis or the register values — *not* the
+boot path, which qemu has already cleared. `just run-pcsx2` (hello) and
+`just run-pcsx2 alloc-hello` are worth a sanity pass too, but qemu has
+already confirmed both write their expected words (`0xC0FFEE42` and
+`0xA110008C` at `0x1000`), so a failure there would specifically mean
+"PCSX2/real loader differs from qemu", which is itself the useful signal.
 
 ## 2. Minimal GS output — the real first milestone
 
@@ -56,11 +69,15 @@ What got resolved along the way, so it's not re-litigated:
 
 What's actually still open:
 
-- Run it. Until #1 is unblocked (a BIOS dump), there is no way to tell
-  whether `solid-color` really shows red, or hangs, or shows something
-  else — everything checked so far is internal consistency (the numbers
-  match their stated formulas) and consistency with ps2sdk, not a
-  hardware/emulator result.
+- Run it on a PS2. Until #1 is unblocked (a BIOS dump), there is no way
+  to tell whether `solid-color` really shows red, or hangs, or shows
+  something else. qemu (progress.md 2026-11-27) got as far as it can
+  here: `just test-qemu` confirms execution reaches `set_gs_crt` with
+  the right arguments in the right registers — dynamically, which the
+  static checks couldn't — and then stops, because the BIOS syscall
+  can't complete without a BIOS. Everything past that instruction is
+  still only internal consistency (the numbers match their stated
+  formulas) and consistency with ps2sdk.
 - If it turns out *not* to work once run, the fallback is the original
   plan: issue a DMA transfer with a GIF packet to push an actual
   primitive (even a full-screen rectangle) to the GS. That's real
@@ -69,22 +86,36 @@ What's actually still open:
 
 ## 3. Validate the target spec dynamically, not just statically
 
-`just test` now statically re-checks the ELF invariants (entry point,
-`_gp`/`_stack_top` formulas, bss) on every build — see progress.md
-2026-11-25. That only guards against *regressions* in things already
-confirmed once; it's not a substitute for #1/#2 below. Things stated as
-"unverified" in progress.md that should still get burned down once
-something actually boots:
+Largely done as of progress.md 2026-11-27: `just test` runs
+`test-static` (ELF invariants — entry point, `_gp`/`_stack_top`
+formulas, bss, `.got`) and then `test-qemu`, which executes each ELF and
+asserts what it did. Code generated from the hand-written target spec
+demonstrably runs on a MIPS III CPU model, which was the core open
+question here.
+
+What's left is specifically the parts of the spec qemu's generic MIPS
+models can't speak to:
 
 - Narrow `max-atomic-width` to whatever the R5900 actually supports if
-  any tool ends up needing atomics.
+  any tool ends up needing atomics. (qemu's R4000 would happily execute
+  64-bit `ll`/`sc`-based atomics that the EE may not implement, so this
+  cannot be settled here — it needs hardware or PCSX2.)
 - If floating point correctness ever matters for a ported tool, write a
   small test that compares EE FPU results against expected IEEE-754
   values for known tricky cases (NaN handling, denormals) — the target
   declares `+single-float` but the EE's documented non-compliance hasn't
-  been checked against actual LLVM codegen.
+  been checked against actual LLVM codegen. Note this *specifically*
+  cannot be done under qemu: its FPU is more standards-compliant than
+  the EE's, so it would mask exactly the discrepancy being looked for.
+  PCSX2 or hardware only.
+- Anything touching MMI (128-bit paired GPRs), scratchpad RAM, or EE
+  cache behaviour — absent from qemu entirely.
 
 ## 4. Pick the second tool to port — done for `alloc`, see progress.md 2026-11-26
+
+Dynamically confirmed working as of progress.md 2026-11-27 — the
+allocator returns usable, non-aliasing memory and `alloc-hello` produces
+its expected result under qemu.
 
 `ps2_rt::heap` now provides a `#[global_allocator]` (a bump allocator
 backed by a fixed 64 KiB static array — intentionally not a

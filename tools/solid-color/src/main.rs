@@ -5,10 +5,15 @@
 //! see `ps2_rt::gs`'s module doc for the confirmed-against-primary-source
 //! blend equation), so the framebuffer's actual contents never matter.
 //!
-//! NOT dynamically verified -- no BIOS dump available in this
-//! environment to boot this under PCSX2/hardware (see docs/next-steps.md
-//! #1). Everything here compiles and the register values are sourced
-//! (see below), but "the screen actually turns red" is unconfirmed.
+//! "The screen actually turns red" is still UNCONFIRMED: that needs a
+//! BIOS dump to boot under PCSX2/hardware (see docs/next-steps.md #1),
+//! and it's the one claim no amount of emulation here can settle -- qemu
+//! has no GS and no BIOS, so the syscall below can't even complete
+//! there. What *is* dynamically confirmed (docs/progress.md 2026-11-27,
+//! `scripts/verify-solid-color-qemu.sh`) is that execution reaches
+//! `set_gs_crt` with the right arguments in `$a0`-`$a2`. Everything past
+//! that instruction rests on the register values being right, which is
+//! sourced (see below) but not observed.
 //!
 //! Display geometry (`DX`/`DY`/`DW`/`DH`/`MAGH`/`MAGV`/`FBW`) is not
 //! hand-derived: these are ps2sdk's own `graph_mode[GRAPH_MODE_NTSC]`
@@ -90,5 +95,5 @@ extern "C" fn rust_main() -> ! {
         gs::write_reg(gs::REG_BGCOLOR, BGCOLOR_VALUE);
         gs::write_reg(gs::REG_PMODE, PMODE_VALUE);
     }
-    loop {}
+    ps2_rt::ps2_rt_halt()
 }

@@ -6,9 +6,12 @@
 //! aliased memory would plausibly change this value), and write it to a
 //! fixed RAM address.
 //!
-//! NOT dynamically verified -- same caveat as every other tool so far,
-//! no BIOS dump available in this environment (see docs/next-steps.md
-//! #1).
+//! Dynamically verified as of docs/progress.md 2026-11-27: `just
+//! test-qemu` boots this and confirms the allocator handed out usable,
+//! non-aliasing memory (the expected `0xA110008C` lands at `0x1000`, and
+//! the heap at halt holds the dead 4-element Vec followed by the live
+//! 8-element one). On a generic MIPS64 CPU model, though, not a PS2 --
+//! see scripts/lib-qemu.sh for what that does and doesn't settle.
 
 #![no_std]
 #![no_main]
@@ -32,5 +35,5 @@ extern "C" fn rust_main() -> ! {
     unsafe {
         core::ptr::write_volatile(PROOF_OF_LIFE_ADDR as *mut u32, 0xA110_0000 | sum);
     }
-    loop {}
+    ps2_rt::ps2_rt_halt()
 }

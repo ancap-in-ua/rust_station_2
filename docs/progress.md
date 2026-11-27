@@ -420,3 +420,158 @@ Same caveat as everything else today: builds and link-time facts
 (symbol presence, section sizes) are checked; whether the allocator
 actually produces correct, non-aliasing pointers on real EE hardware is
 not — that's gated on next-steps.md #1 like everything else.
+
+## 2026-11-27 — code actually executes: a qemu-based dynamic test harness
+
+Every entry above ends with the same caveat — "not dynamically verified,
+no BIOS dump in this environment." next-steps.md #1 (run it under PCSX2)
+blocks #2 and #3, and no amount of static checking substitutes for it.
+This entry removes most of that caveat without a BIOS, by executing the
+unmodified release ELFs under `qemu-system-mips64el`.
+
+### Why an unmodified PS2 ELF runs under qemu at all
+
+Not a workaround, a coincidence of two designs lining up. `link.ld`
+places the image at `0x0010_0000` with `PhysAddr == VirtAddr`, because
+PS2 loaders hand control over with low addresses identity-mapped to
+physical RAM. That is also precisely how a MIPS CPU behaves coming out of
+reset: `Status.ERL = 1` makes kuseg unmapped and identity-mapped to
+physical addresses. So the same bytes load and run in both places, for
+the same reason — no separate test build, no relinking, no `#[cfg(test)]`
+variant. What `just test-qemu` boots is what you'd hand a PS2 loader.
+
+Two things had to be discovered empirically:
+
+- **`-M malta -kernel` cannot be used.** It rejects any kernel linked
+  below `0x8000_0000` with "Trap-and-Emul kernels (Linux
+  CONFIG_KVM_GUEST) are not supported" — which is every PS2 ELF.
+  `-device loader,file=...,cpu-num=0` loads the segments and sets the
+  CPU's PC from the ELF entry with no such check, and works.
+- **`-cpu R4000`**, chosen over `5Kc`: both run these tools identically,
+  but R4000 is a 64-bit MIPS III part, matching the `mips3` ELF flag
+  verify-elf.sh asserts, so it can't quietly accept a post-MIPS-III
+  instruction the EE would reject. `-m 32` matches the PS2's RAM exactly,
+  so `_stack_top = 0x200_0000` sits at the real end of RAM rather than
+  somewhere forgiving.
+
+### What it proved (first dynamic results in this project)
+
+`scripts/verify-qemu.sh <elf> <expected-proof-word>` boots a tool, drives
+it over qemu's gdbstub, and asserts. All of the following were previously
+assumed or statically inferred, and are now observed:
+
+- `_start`'s hand-written assembly runs, and `$gp` at halt equals
+  `link.ld`'s `_gp` exactly (`0x1081a0` for `hello`) — the "defensive,
+  possibly unnecessary" `$gp` setup at least demonstrably does what it
+  intended. `$sp` lands inside the stack region (`0x1fffff0`, i.e.
+  `_stack_top - 16` after `rt_start`'s frame).
+- `hello` writes `0xc0ffee42` to `0x1000`. The proof-of-life value the
+  README has been telling people to go look for in PCSX2's memory viewer
+  for four days is, in fact, the value that gets written.
+- **`boot.rs`'s `zero_bss()` works, checked non-vacuously.** This
+  mattered more than expected. Fresh qemu RAM reads back as zero, so a
+  naive "is bss zero after boot" check would pass even if `zero_bss` were
+  a no-op — exactly the sort of vacuous test this log has been careful
+  about elsewhere. Instead the harness writes `0xd5` over the entire bss
+  range *while the guest is still frozen at its entry point* (qemu `-S`
+  plus gdb `restore`), then asserts not one `0xd5` byte survives. It also
+  asserts the pre-boot dirtying itself took effect, so the check can't
+  silently become vacuous if `restore` ever stops working.
+- **The bump allocator hands out real, usable, non-aliasing memory.**
+  `alloc-hello` writes `0xa110008c` — `0xA110_0000 | 140`, the sum
+  computed from heap memory it actually allocated and wrote. The heap
+  contents at halt tell the whole story and match a bump allocator
+  exactly: the dead 4-element `Vec` (`0,1,4,9`) still sitting at offset 0
+  unreclaimed, the live 8-element one (`0,1,4,9,0x10,0x19,0x24,0x31`)
+  after it, cursor at `0x30` = 48 bytes for 16 + 32 bytes of allocation.
+  Also the first time `zero_bss` ran with a non-zero length at all (every
+  earlier tool had `__bss_start == __bss_end`).
+
+### `solid-color`: what's checkable, and what still isn't
+
+It cannot run to completion here. Its first act is BIOS syscall `0x02`,
+and qemu has no PS2 BIOS — the `syscall` instruction traps to an
+exception vector holding no handler and never returns (confirmed by hand:
+stepping over that single instruction hangs). So `verify-qemu.sh` can't
+be used on it.
+
+But the part that its static checks structurally *could not* reach is
+checkable: `scripts/verify-solid-color-qemu.sh` breaks on `set_gs_crt`
+and reads the argument registers. verify-solid-color.sh pins the stub's
+compiled bytes and main.rs const-asserts the register values, yet
+neither can show execution actually *arrives* there with the right
+arguments in the right registers — and "the arguments are already in
+`$a0`-`$a2` by the ordinary calling convention" is the entire reason
+that stub can be four instructions with no marshalling (see 2026-11-26).
+That's a compiler-dependent assumption the source only implies. Now
+observed: `$a0 = 0` (non-interlaced), `$a1 = 1` (NTSC), `$a2 = 0`
+(field), with `syscall` confirmed as the very next instruction, so those
+really are the arguments as a BIOS would see them.
+
+Still unproven, and unprovable this way: **whether the screen turns
+red.** That remains next-steps.md #1.
+
+### Non-vacuity, checked the usual way
+
+Each new check was shown to fail on a real regression, not just to pass:
+
+- Broke `zero_bss` (`write_bytes(start, 0, len * 0)`), rebuilt: caught
+  three ways at once — 65544 surviving `0xd5` bytes, proof word `0x0`,
+  and `FAIL terminal state: the tool PANICKED`. That last one is worth
+  noting: with bss left dirty, the allocator's cursor came up as
+  `0xd5d5...`, the allocation failed, and the panic path ran. The
+  halt-vs-panic distinction earned its keep on its first real failure.
+- Pointed `solid-color` at `syscall::PAL` instead of `NTSC`, rebuilt:
+  `FAIL $a1 (display_mode = GRAPH_MODE_NTSC): got 2, want 1`.
+- Made a tool spin without reaching halt: reported "the ELF never
+  reached its terminal state under qemu (gdb timed out — the guest is
+  hung, faulting, or looping somewhere that is neither ps2_rt_halt nor
+  ps2_rt_panicked)" rather than hanging `just test` forever.
+- Removed the `ps2_rt_halt` call entirely: the symbol gets
+  garbage-collected, and the script says so by name instead of failing
+  obscurely.
+
+### `ps2_rt_halt` / `ps2_rt_panicked`, and an ICF surprise
+
+Each tool's terminal `loop {}` is now `ps2_rt::ps2_rt_halt()`, and the
+panic handler ends in `ps2_rt_panicked()`. The point is a stable symbol
+to break on: a bare `loop {}` is an anonymous backwards branch at
+whatever address LLVM picks, so a test would have to hardcode an address
+that moves on every unrelated change.
+
+First attempt had both as `#[inline(never)] #[no_mangle]` functions whose
+body was `loop {}` — and they came out **at the same address** in all
+three tools, folded together as identical code. A distinction by name
+only is no distinction at all once the linker is allowed to merge
+bodies. Fixed by having each pass a distinct tag (`"OKOK"` / `"PAN!"`) to
+a shared `spin_forever`, which differs by one immediate and so can't be
+folded; the tag is also readable in `$a0` from a debugger with no symbols
+loaded. Worth remembering for any future "two functions that differ only
+in meaning" pattern.
+
+Note `ps2_rt_panicked` is garbage-collected out of tools with no
+reachable panic path (`hello`, `solid-color` — confirmed with `nm`), so
+anything breaking on it must treat the symbol as optional.
+
+### What this does NOT cover
+
+Listed in full at the top of `scripts/lib-qemu.sh`, because the risk here
+is someone mistaking a green `just test-qemu` for "it works on a PS2":
+
+- Anything GS/PCRTC — qemu has no PS2 graphics hardware; writes to
+  `0x1200_0000` go nowhere observable.
+- Anything BIOS — no syscall can complete.
+- Anything R5900-specific — the 128-bit MMI instructions, the non-IEEE-754
+  single-precision FPU, scratchpad RAM, and EE cache behaviour are all
+  absent from qemu's generic MIPS models. Code relying on them passes
+  here and fails on hardware. This is why next-steps.md #3's float-
+  correctness item stays open: qemu's FPU is *more* standards-compliant
+  than the EE's, so it cannot reveal that class of bug.
+- DMA, the GIF, VU0/VU1, SIF/IOP — nothing of the PS2 beyond the CPU core
+  and RAM exists here.
+
+`just test` now runs `test-static` then `test-qemu`; `just debug-qemu
+<tool>` boots a tool and drops into an interactive gdb attached to it.
+qemu was added to flake.nix (it had been present only by accident, via
+the host system, which would have made `just test` fail inside a clean
+`nix develop`).
