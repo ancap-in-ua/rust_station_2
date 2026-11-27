@@ -27,7 +27,7 @@
 
 use core::arch::global_asm;
 
-#[cfg(target_arch = "mips64")]
+#[cfg(target_arch = "mips")]
 global_asm!(
     r#"
     .section .text.syscall, "ax", @progbits
@@ -42,7 +42,7 @@ set_gs_crt:
     "#
 );
 
-#[cfg(target_arch = "mips64")]
+#[cfg(target_arch = "mips")]
 unsafe extern "C" {
     /// BIOS syscall 0x02. `interlace`/`field` are booleans in the same
     /// i16-wide argument slots ps2sdk's `extern void SetGsCrt(s16

@@ -4,60 +4,50 @@ Ordered roughly by what unblocks the most follow-on work. See
 [progress.md](progress.md) for what's already in place and what's been
 verified vs. just assumed.
 
-## 1. Make the ELF loadable by a real PS2 loader (highest priority)
+## 1. Run it on a real PS2 — DONE (2026-11-27)
 
-**Status changed completely on 2026-11-27.** A BIOS dump arrived, the
-ELFs were booted on PCSX2 for the first time, and they don't work. Read
-progress.md 2026-11-27 ("a real BIOS arrives") in full before touching
-anything here. In short:
+The tools boot on PCSX2 with a real BIOS and do what they claim.
+`just test-pcsx2` asserts it on every run, over PCSX2's PINE socket:
+`hello` publishes `0xc0ffee42`, `alloc-hello` publishes `0xa110008c`
+with the bump allocator's signature visible in the heap, `solid-color`
+runs its whole GS sequence, and none of them trip a TLB miss.
 
-- **The target spec emits ELF64; PCSX2's loader is ELF32-only and
-  segfaults on our binaries.** This is the blocker for everything else.
-  A hand-assembled ELF32 with the same load address and entry point
-  loads and runs, so nothing else about the image layout is wrong.
-- **`0x1000` (the proof-of-life address) is not writable** from a
-  user-mode ELF — TLB miss. The first MiB is the BIOS kernel's.
-- **`ps2_rt::syscall::set_gs_crt` hangs and never returns**, cause
-  unknown (see #2).
+Getting there needed two fixes and produced one retraction — see
+progress.md 2026-11-27 (both entries):
 
-The work, in order:
+- The target spec emitted ELF64, which PCSX2's ELF32-only loader
+  *segfaults* on. Re-targeted to `targets/mipsel-sony-ps2.json`
+  (`mips`/o32/32-bit pointers, `mips3` CPU retained).
+- The `0x1000` proof-of-life address was unwritable from a user-mode
+  ELF (TLB miss — the first MiB is the BIOS kernel's). Replaced with
+  `ps2_rt::PS2_RT_PROOF`, a static in the tool's own image.
+- **Retracted:** "`set_gs_crt` hangs and never returns." It doesn't.
+  The hand-assembled probe that produced that result kept its marker
+  registers in `$t0`/`$t1` across the syscall, which the BIOS handler
+  is entitled to clobber. The 2026-11-26 syscall research was right.
 
-1. **Re-target to ELF32.** This is a pointer-width change (64 → 32),
-   not a flag tweak. `targets/mips64r5900el-ps2.json` currently asks
-   for `mips64` + n64, which is what produces ELF64; PS2 toolchains
-   (ee-gcc/ps2sdk) use 32-bit `mips-r5900-elf` with the **o32** ABI.
-   Touches the target JSON, `link.ld`'s assumptions, `boot.rs`, and
-   every expectation in `verify-elf.sh` — which currently *asserts*
-   `ELF class == ELF64`, i.e. asserts the bug.
-2. **Replace the proof-of-life convention.** Writing to a fixed low
-   address can't work. Either write into memory the program owns (a
-   `static` in its own image — markers at `0x100800` read back fine) or
-   go through kseg0 (`0x8000_0000`, cached) / kseg1 (`0xA000_0000`,
-   uncached) for a genuinely fixed physical address.
-3. **Then** re-run everything on PCSX2 and see what the next layer of
-   wrong assumptions turns out to be.
+What's left for this item is only the hardware this environment can't
+reach: a real console. PCSX2 is not a PS2 either — see #2's open
+questions for a case where that distinction may already matter.
 
-Harness notes for whoever picks this up: PCSX2 is scriptable. Run it
-with `-datapath <dir>` to keep its state out of `~/.config/PCSX2`, set
-`[UI] SetupWizardIncomplete = false` (otherwise it silently refuses to
-boot anything), `[Filenames] BIOS = <file>`, and `[EmuCore] EnablePINE =
-true`. PINE then gives scripted EE memory reads over a unix socket at
-`$XDG_RUNTIME_DIR/pcsx2.sock` — enough to assert proof-of-life values
-without a human looking at a memory viewer. Note PINE reads EE RAM
-only; GS privileged registers read back as zero through it whether or
-not a write landed, so it can't be used to check those. The ELF must be
-passed as a positional argument (`-elf <file>` alone boots nothing) and
-needs a `.elf` extension.
+A BIOS dump goes in `bios_dump/` (gitignored — copyrighted, not
+redistributable). Without one, `test-static` and `test-qemu` still run
+and `test-pcsx2` skips loudly.
 
 ## 2. Minimal GS output — the real first milestone
 
-`hello` currently proves nothing visible. The first milestone that
-actually exercises boot correctness, `$sp`/`$gp` setup, and bss zeroing
-end-to-end is: **get a solid color on screen.** As of progress.md
-2026-11-26 (both entries), this is *implemented*, sourced, and
-statically checked (`tools/solid-color`, `ps2-rt/src/gs.rs`,
-`ps2-rt/src/syscall.rs`, `scripts/verify-solid-color.sh`) — what's left
-is entirely #1: nothing here has run anywhere.
+**This is now the only thing standing between the project and its first
+visible result, and it is genuinely unsolved.**
+
+`solid-color` runs end to end on a real PS2 as of 2026-11-27: the
+`SetGsCrt` syscall returns, all four GS registers are written, the tool
+reaches its terminal state and publishes `0x5011d000`. And the screen
+is **100% black**, not red.
+
+So the PMODE-blend approach is finally being *tested* rather than
+blocked, and it isn't doing what the GS User's Manual reading
+predicted. Verified the capture isn't lying by booting the BIOS itself
+and capturing that — it comes back with the boot screen's colors.
 
 What got resolved along the way, so it's not re-litigated:
 
@@ -79,38 +69,32 @@ What got resolved along the way, so it's not re-litigated:
   `MMOD`/`SLBG`/`ALP=0`, skipping GIF/DMA entirely" approach is no longer
   a hypothesis.
 
-What's actually still open — **and the third bullet above is no longer
-"resolved", see below**:
+What's actually still open, roughly in order of suspicion:
 
-- **`set_gs_crt` hangs and never returns on PCSX2.** Tested on
-  2026-11-27 with a hand-assembled ELF32 doing exactly what the Rust
-  stub does, with progress markers either side of the `syscall`:
-  execution reaches it and never comes back, still hung after 25
-  seconds. Ruled out: missing stack, `-fastboot` vs `-slowboot`, bad
-  CP0 state (user mode, `EXL = 0`, `CU0 = 1` — all normal), and the
-  negative/kernel-mode syscall number. Removing the `syscall`
-  instruction lets everything else run to completion. Cause unknown.
-  **This is the blocker for the whole milestone**, and no amount of
-  static byte-checking can see it — `verify-solid-color.sh` passes,
-  because the stub's bytes really are what we intended.
-- The PMODE-blend approach is therefore **untested, not confirmed**,
-  despite what the bullet list above used to say. With the syscall
-  removed and all four GS registers written with the const-asserted
-  values, PCSX2 shows a 100% black screen — but `SetGsCrt` is what
-  programs the PCRTC's video timings, so with no timings there is
-  plausibly no signal to blend and black is expected either way. The
-  hypothesis can't be judged until the syscall works.
-- Worth reconsidering whether `SetGsCrt` is the right mechanism at all.
-  If the syscall can't be made to work, the alternatives are writing
-  `SMODE1`/`SYNCH1`/`SYNCH2`/`SYNCV` directly (which the GS Users
-  Manual explicitly says is not how application code is meant to do it
-  — see 2026-11-26) or finding how ps2sdk's `graph_set_mode` actually
-  reaches the kernel on a booted-from-ELF system.
-- If the PCRTC approach turns out not to work once it can be judged,
-  the fallback is the original plan: issue a DMA transfer with a GIF
-  packet to push an actual primitive (even a full-screen rectangle) to
-  the GS. That's real hardware programming with no C library to crib
-  conventions from — budget real time for it if it comes to that.
+- **`SMODE2` is never written.** `ps2_rt::gs` defines `REG_SMODE2`
+  ("interlace, field mode, **display enable**") and `solid-color`
+  doesn't touch it. If `SetGsCrt` doesn't leave the display enabled,
+  nothing reaches the CRTC no matter what the merge circuit computes.
+  Cheapest thing to try first.
+- **Whether PCSX2's PCRTC emulates this path at all.** The whole trick
+  depends on `SLBG`/`MMOD`/`ALP` producing output from a circuit whose
+  framebuffer points at VRAM nobody ever wrote. That is an exotic
+  corner, and an emulator is allowed to get it wrong where real
+  hardware wouldn't. Distinguishing "our registers are wrong" from
+  "PCSX2 doesn't model this" may need real hardware — the first thing
+  in this project where PCSX2 being not-a-PS2 actually bites.
+- **Whether the `ALP = 0` reading of the blend equation is inverted.**
+  Re-derive from the GS User's Manual rather than from our own note.
+- If the PCRTC approach turns out to be a dead end, the fallback is the
+  original plan: issue a DMA transfer with a GIF packet to push an
+  actual primitive (even a full-screen rectangle) to the GS. That's
+  real hardware programming with no C library to crib conventions from
+  — budget real time for it if it comes to that.
+
+Note the "no longer a hypothesis" claim in the bullet list above was
+written before anything had run. The bit layouts and the blend equation
+really are confirmed against the primary source; what was never
+confirmed is that they add up to a red screen, and so far they don't.
 
 ## 3. Validate the target spec dynamically, not just statically
 

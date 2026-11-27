@@ -7,7 +7,7 @@
 
 use core::arch::global_asm;
 
-#[cfg(target_arch = "mips64")]
+#[cfg(target_arch = "mips")]
 global_asm!(
     r#"
     .section .text.start, "ax", @progbits
@@ -31,7 +31,7 @@ _start:
     "#
 );
 
-#[cfg(target_arch = "mips64")]
+#[cfg(target_arch = "mips")]
 unsafe extern "C" {
     static mut __bss_start: u8;
     static mut __bss_end: u8;
@@ -60,7 +60,7 @@ const _: () = assert!(bss_len(0x0010_0000, 0x0010_0040) == 0x40);
 // memory if it somehow did.
 const _: () = assert!(bss_len(0x0010_0040, 0x0010_0000) == 0);
 
-#[cfg(target_arch = "mips64")]
+#[cfg(target_arch = "mips")]
 unsafe fn zero_bss() {
     let start = core::ptr::addr_of_mut!(__bss_start);
     let end = core::ptr::addr_of!(__bss_end);
@@ -71,12 +71,12 @@ unsafe fn zero_bss() {
 }
 
 // Binary crates must provide this: `#[no_mangle] extern "C" fn rust_main() -> !`.
-#[cfg(target_arch = "mips64")]
+#[cfg(target_arch = "mips")]
 unsafe extern "C" {
     fn rust_main() -> !;
 }
 
-#[cfg(target_arch = "mips64")]
+#[cfg(target_arch = "mips")]
 #[no_mangle]
 extern "C" fn rt_start() -> ! {
     unsafe {

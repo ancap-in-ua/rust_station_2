@@ -30,11 +30,15 @@
           # scripts/lib-qemu.sh. `just test-qemu` depends on it.
           qemu
           gdb # drives the qemu/PCSX2 gdbstubs; also real-hardware targets
+          # scripts/pine.py talks to PCSX2's IPC socket to read EE memory,
+          # which is what makes `just test-pcsx2` assertable rather than
+          # "look at the memory viewer". Stdlib only -- no package set.
+          python3
           just
         ];
 
         shellHook = ''
-          echo "ps2-rust-dev shell: pcsx2, qemu, cargo-binutils, gdb, just available."
+          echo "ps2-rust-dev shell: pcsx2, qemu, cargo-binutils, gdb, python3, just available."
           echo "Rust itself comes from rustup via rust-toolchain.toml."
         '';
       };

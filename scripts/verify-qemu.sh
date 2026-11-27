@@ -30,12 +30,8 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib-qemu.sh
 source "$here/lib-qemu.sh"
 
-elf="${1:?usage: verify-qemu.sh <path-to-elf> <expected-proof-word> [proof-address]}"
-expected_proof="${2:?usage: verify-qemu.sh <path-to-elf> <expected-proof-word> [proof-address]}"
-# Both `hello` and `alloc-hello` use 0x1000 as their PROOF_OF_LIFE_ADDR
-# (an otherwise-unused low RAM address); overridable for future tools
-# that pick somewhere else.
-proof_addr="${3:-0x1000}"
+elf="${1:?usage: verify-qemu.sh <path-to-elf> <expected-proof-word>}"
+expected_proof="${2:?usage: verify-qemu.sh <path-to-elf> <expected-proof-word>}"
 
 qemu_require_tools
 
@@ -63,6 +59,10 @@ check_hex() {
 
 halt_addr="$(elf_sym "$elf" ps2_rt_halt)"
 panicked_addr="$(elf_sym "$elf" ps2_rt_panicked)"
+# Looked up by symbol, not hardcoded: the proof-of-life slot is a static
+# in the tool's own image (see ps2_rt::PS2_RT_PROOF). It used to be a
+# fixed 0x1000, which turned out to be unwritable on a real PS2.
+proof_addr="$(elf_sym "$elf" PS2_RT_PROOF)"
 gp_addr="$(elf_sym "$elf" _gp)"
 stack_top="$(elf_sym "$elf" _stack_top)"
 heap_start="$(elf_sym "$elf" _heap_start)"
@@ -70,7 +70,8 @@ bss_start="$(elf_sym "$elf" __bss_start)"
 bss_end="$(elf_sym "$elf" __bss_end)"
 
 for required in "ps2_rt_halt:$halt_addr" "_gp:$gp_addr" "_stack_top:$stack_top" \
-    "_heap_start:$heap_start" "__bss_start:$bss_start" "__bss_end:$bss_end"; do
+    "_heap_start:$heap_start" "__bss_start:$bss_start" "__bss_end:$bss_end" \
+    "PS2_RT_PROOF:$proof_addr"; do
     if [[ -z "${required#*:}" ]]; then
         echo "verify-qemu: $elf has no \`${required%%:*}\` symbol -- is it a" \
             "ps2-rt ELF, and does its rust_main end in ps2_rt::ps2_rt_halt()?" >&2
@@ -98,6 +99,14 @@ script="$work/driver.gdb"
     echo 'set confirm off'
     echo 'set pagination off'
     echo 'set height 0'
+    # The ELF is ELF32 (o32), so gdb infers a 32-bit MIPS architecture
+    # and then rejects qemu's register dump: qemu models a 64-bit CPU
+    # (R4000 -- see lib-qemu.sh) and sends 64-bit registers, so gdb
+    # errors with "Remote 'g' packet reply is too long". Forcing the
+    # 64-bit ISA before connecting makes the register widths agree while
+    # still using the ELF32 file for symbols -- which is exactly the
+    # real EE situation: 64-bit CPU, 32-bit pointers.
+    echo 'set architecture mips:isa64'
     echo "target remote :$QEMU_PORT"
 
     # The guest is frozen at the ELF entry point and has executed
@@ -179,7 +188,7 @@ else
     fail=1
 fi
 
-check_hex "proof-of-life word at $proof_addr" \
+check_hex "proof-of-life word (PS2_RT_PROOF @ $proof_addr)" \
     "$(result "$gdb_out" proof)" "$expected_proof"
 
 # bss zeroing, checked against the pattern written before boot. Counting

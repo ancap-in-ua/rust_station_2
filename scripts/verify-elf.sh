@@ -1,14 +1,6 @@
 #!/usr/bin/env bash
 # Static structural checks on a built PS2 ELF.
 #
-# !! The "ELF class == ELF64" check below asserts a KNOWN BUG. PCSX2's
-# !! loader is ELF32-only and segfaults on our ELF64 binaries; PS2 ELFs
-# !! are ELF32 by universal convention. This check was written during the
-# !! initial scaffold, before anything had ever been booted, and it has
-# !! been locking in the defect ever since. It is left as-is only so the
-# !! fix (re-targeting to ELF32 -- docs/next-steps.md #1) flips it
-# !! deliberately rather than silently. See docs/progress.md 2026-11-27.
-#
 # None of this proves the ELF actually boots under PCSX2/real hardware —
 # that still needs a BIOS dump and a human in front of PCSX2 (see
 # docs/next-steps.md #1). What this *does* catch is regressions in
@@ -54,12 +46,26 @@ machine="$(grep -m1 'Machine:' <<<"$header" | sed 's/.*Machine:\s*//')"
 flags="$(grep -m1 'Flags:' <<<"$header" | sed 's/.*Flags:\s*//')"
 entry="$(grep -m1 'Entry point address:' <<<"$header" | awk '{print $NF}')"
 
-check "ELF class" "$class" "ELF64"
+# ELF32, not ELF64, and this is load-bearing rather than cosmetic: PS2
+# ELFs are ELF32 by universal convention (ee-gcc/ps2sdk build o32
+# objects), and PCSX2's loader parses the section header table assuming
+# 40-byte ELF32 entries. Handed an ELF64, it reads 64-byte entries as
+# 40-byte ones, walks off the end of the table and segfaults -- taking
+# the emulator down, not refusing the file. This check asserted ELF64
+# from the initial scaffold until 2026-11-27, when a BIOS dump finally
+# made it possible to boot anything; see docs/progress.md.
+check "ELF class (PCSX2's loader is ELF32-only)" "$class" "ELF32"
 check "machine"   "$machine" "MIPS R3000"
-case "$flags" in
-    *noreorder*mips3* | *mips3*noreorder*) echo "ok    flags include noreorder+mips3 ($flags)" ;;
-    *) echo "FAIL  flags missing noreorder/mips3: $flags" >&2; fail=1 ;;
-esac
+# o32 + mips3 is the EE toolchain combination: MIPS III instruction set
+# (the EE has no MIPS32r2 ext/ins/rotr) with 32-bit pointers and the o32
+# ABI that every PS2 loader and every ps2sdk object expects.
+for want in noreorder o32 mips3; do
+    case "$flags" in
+        *"$want"*) ;;
+        *) echo "FAIL  flags missing $want: $flags" >&2; fail=1 ;;
+    esac
+done
+(( fail )) || echo "ok    flags include noreorder+o32+mips3 ($flags)"
 check_hex "entry point" "$entry" "0x100000"
 
 # readelf right-pads the `[N]` index column to a fixed width, so for
@@ -107,12 +113,14 @@ check_hex "bss size (__bss_end - __bss_start)" "$((bss_end - bss_start))" "$expe
 # generated code actually consumes.
 check "relocations" "$(readelf -r "$elf" | grep -v '^$')" "There are no relocations in this file."
 
+# Two 4-byte entries under o32/ELF32 (it was two 8-byte entries, 0x10
+# total, while this was an n64/ELF64 target).
 got_size="$(awk '$2 == ".got" {print "0x"$6}' <<<"$sections")"
-check_hex ".got size (psABI's 2 reserved header entries only)" "$got_size" "0x10"
+check_hex ".got size (psABI's 2 reserved header entries only)" "$got_size" "0x8"
 
-got_bytes="$(readelf -x .got "$elf" | awk '$1 ~ /^0x/ {print $2, $3, $4, $5}')"
-check ".got content (reserved header: 0, then 0x8000000000000000)" \
-    "$got_bytes" "00000000 00000000 00000000 00000080"
+got_bytes="$(readelf -x .got "$elf" | awk '$1 ~ /^0x/ {print $2, $3}')"
+check ".got content (reserved header: 0, then 0x80000000)" \
+    "$got_bytes" "00000000 00000080"
 
 if [[ "$fail" -ne 0 ]]; then
     echo "verify-elf: FAILED" >&2

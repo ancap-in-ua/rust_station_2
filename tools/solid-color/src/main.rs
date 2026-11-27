@@ -86,6 +86,9 @@ const _: () = assert!(DISPLAY1_VALUE == 0x000d_f9ff_0181_a28c);
 const _: () = assert!(BGCOLOR_VALUE == 0xff);
 const _: () = assert!(PMODE_VALUE == 0xa5);
 
+/// Published once every register write below has happened.
+const PROOF_OF_LIFE_VALUE: u32 = 0x5011_D000;
+
 #[no_mangle]
 extern "C" fn rust_main() -> ! {
     unsafe {
@@ -95,5 +98,11 @@ extern "C" fn rust_main() -> ! {
         gs::write_reg(gs::REG_BGCOLOR, BGCOLOR_VALUE);
         gs::write_reg(gs::REG_PMODE, PMODE_VALUE);
     }
+    // Reaching here means the whole sequence ran. Today it never does:
+    // `set_gs_crt` above hangs and never returns on PCSX2 (see this
+    // module's doc comment), so this slot stays 0 and that is how the
+    // harness tells "the syscall is still broken" from "the syscall
+    // works but the screen isn't red" -- two very different problems.
+    ps2_rt::set_proof(PROOF_OF_LIFE_VALUE);
     ps2_rt::ps2_rt_halt()
 }

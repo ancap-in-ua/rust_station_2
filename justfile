@@ -19,7 +19,7 @@ size:
 
 # Boot a tool's ELF in PCSX2 (default: hello). e.g. `just run-pcsx2 solid-color`.
 run-pcsx2 tool="hello": build
-    ./scripts/run-pcsx2.sh target/mips64r5900el-ps2/release/{{tool}}
+    ./scripts/run-pcsx2.sh target/mipsel-sony-ps2/release/{{tool}}
 
 # Boot a tool under qemu with an interactive gdb attached, frozen at the
 # entry point. Not a PS2 -- no GS, no BIOS syscalls; see
@@ -27,10 +27,13 @@ run-pcsx2 tool="hello": build
 #
 # Boot a tool's ELF under qemu + gdb (default: hello). e.g. `just debug-qemu alloc-hello`.
 debug-qemu tool="hello": build
-    ./scripts/debug-qemu.sh target/mips64r5900el-ps2/release/{{tool}}
+    ./scripts/debug-qemu.sh target/mipsel-sony-ps2/release/{{tool}}
 
-# All checks, static and dynamic. No BIOS dump needed for any of it.
-test: test-static test-qemu
+# test-static and test-qemu need no BIOS dump; test-pcsx2 skips loudly
+# without one.
+#
+# All three check layers: static, qemu, and real PCSX2.
+test: test-static test-qemu test-pcsx2
 
 # Rebuilds (exercising the `const`-assertion checks in ps2-rt and each
 # tool) then checks the resulting ELFs' structure (entry point,
@@ -40,12 +43,14 @@ test: test-static test-qemu
 #
 # Static ELF structure checks -- no emulator at all.
 test-static: build
-    ./scripts/verify-elf.sh target/mips64r5900el-ps2/release/hello
-    ./scripts/verify-elf.sh target/mips64r5900el-ps2/release/solid-color
-    ./scripts/verify-solid-color.sh target/mips64r5900el-ps2/release/solid-color
-    # alloc-hello's bss isn't empty: ps2_rt::heap's static HEAP (64 KiB)
-    # plus BumpAllocator's `next` cursor (one usize, 8 bytes).
-    ./scripts/verify-elf.sh target/mips64r5900el-ps2/release/alloc-hello "$((64 * 1024 + 8))"
+    # 4 bytes of bss: ps2_rt's PS2_RT_PROOF, the proof-of-life slot.
+    ./scripts/verify-elf.sh target/mipsel-sony-ps2/release/hello 4
+    ./scripts/verify-elf.sh target/mipsel-sony-ps2/release/solid-color 4
+    ./scripts/verify-solid-color.sh target/mipsel-sony-ps2/release/solid-color
+    # alloc-hello: PS2_RT_PROOF (4) + 12 bytes padding to align
+    # ps2_rt::heap's HEAP to 16 + HEAP itself (64 KiB) + BumpAllocator's
+    # `next` cursor (one usize = 4 bytes under o32).
+    ./scripts/verify-elf.sh target/mipsel-sony-ps2/release/alloc-hello "$((4 + 12 + 64 * 1024 + 4))"
 
 # Actually executes each ELF under qemu (needs qemu + gdb, but no PS2
 # BIOS dump) and asserts what it did -- boot shim, $gp/$sp, bss zeroing,
@@ -54,11 +59,25 @@ test-static: build
 #
 # Dynamic checks: run each ELF under qemu and assert what it did.
 test-qemu: build
-    ./scripts/verify-qemu.sh target/mips64r5900el-ps2/release/hello 0xc0ffee42
+    ./scripts/verify-qemu.sh target/mipsel-sony-ps2/release/hello 0xc0ffee42
     # 0xA110_0000 | 140, where 140 = sum of i*i for i in 0..8 -- computed
     # from heap memory the bump allocator actually handed out.
-    ./scripts/verify-qemu.sh target/mips64r5900el-ps2/release/alloc-hello 0xa110008c
+    ./scripts/verify-qemu.sh target/mipsel-sony-ps2/release/alloc-hello 0xa110008c
     # solid-color can't run to completion under qemu (its BIOS syscall
     # has no implementation there and hangs), so it gets the subset of
     # its behaviour that is checkable instead.
-    ./scripts/verify-solid-color-qemu.sh target/mips64r5900el-ps2/release/solid-color
+    ./scripts/verify-solid-color-qemu.sh target/mipsel-sony-ps2/release/solid-color
+
+# Runs each ELF on an actual PS2: PCSX2 with a real BIOS. The only layer
+# that proves anything about a PlayStation 2 -- it's what caught the
+# ELF-class and proof-of-life bugs that static and qemu checks were both
+# green on. Needs a dump in bios_dump/; skips loudly without one.
+#
+# Dynamic checks: run each ELF on real PCSX2 and assert what it did.
+test-pcsx2: build
+    ./scripts/verify-pcsx2.sh target/mipsel-sony-ps2/release/hello 0xc0ffee42
+    ./scripts/verify-pcsx2.sh target/mipsel-sony-ps2/release/alloc-hello 0xa110008c
+    # solid-color gets this far: the BIOS SetGsCrt call returns and all
+    # four GS registers are written. What it does NOT yet do is turn the
+    # screen red -- see docs/next-steps.md #2.
+    ./scripts/verify-pcsx2.sh target/mipsel-sony-ps2/release/solid-color 0x5011d000

@@ -6,18 +6,25 @@ custom LLVM target spec since rustc has no built-in PS2 target.
 
 ## Layout
 
-- `targets/mips64r5900el-ps2.json` — custom rustc target spec for the EE.
+- `targets/mipsel-sony-ps2.json` — custom rustc target spec for the EE:
+  32-bit MIPS, o32 ABI, `mips3` CPU, hardware single-float. ELF32 is
+  not optional — PCSX2's loader segfaults on ELF64 (docs/progress.md
+  2026-11-27).
 - `ps2-rt/` — runtime support crate: entry point (`_start`), linker script
   (`link.ld`), bss zeroing, panic handler, bump allocator, GS/BIOS-syscall
   plumbing. Every tool depends on this.
 - `tools/hello/` — minimal example tool / template for new tools.
   `tools/alloc-hello/` exercises the allocator; `tools/solid-color/`
   attempts the solid-red-screen milestone.
-- `scripts/` — `verify-elf.sh` + `verify-solid-color.sh` (static ELF
-  checks), `verify-qemu.sh` + `verify-solid-color-qemu.sh` (dynamic, run
-  the ELF under qemu), `lib-qemu.sh` (shared qemu/gdb plumbing, and the
-  authoritative list of what emulation does and doesn't prove),
-  `run-pcsx2.sh` / `debug-qemu.sh` (launchers).
+- `scripts/` — three layers of checks: `verify-elf.sh` +
+  `verify-solid-color.sh` (static), `verify-qemu.sh` +
+  `verify-solid-color-qemu.sh` (run the ELF under qemu, no BIOS needed),
+  and `verify-pcsx2.sh` (run it on a real PS2). Plus `lib-qemu.sh` /
+  `lib-pcsx2.sh` (shared plumbing, and the authoritative notes on what
+  each emulator does and doesn't prove), `pine.py` (reads EE memory out
+  of a running PCSX2), and the `run-pcsx2.sh` / `debug-qemu.sh`
+  launchers.
+- `bios_dump/` — where a PS2 BIOS dump goes (gitignored; see "Testing").
 - `.cargo/config.toml` — pins the custom target as default and configures
   `build-std` (core/alloc have no prebuilt artifacts for this target).
 - `rust-toolchain.toml` — pins nightly + `rust-src` + `llvm-tools-preview`,
@@ -49,9 +56,10 @@ same infinite spin, but it's a named symbol, which is how
 "finished" apart from "panicked", which lands in `ps2_rt_panicked`).
 A tool whose `rust_main` ends in `loop {}` can't be checked by it.
 
-To wire a new tool into `just test`, add it to the `test-static` and
-`test-qemu` recipes in the `justfile` — the latter takes the
-proof-of-life word you expect it to write to `0x1000`.
+To wire a new tool into `just test`, add it to the `test-static`,
+`test-qemu` and `test-pcsx2` recipes in the `justfile` — the latter two
+take the proof-of-life word you expect it to publish via
+`ps2_rt::set_proof`.
 
 ## Building / running
 
@@ -59,58 +67,62 @@ proof-of-life word you expect it to write to `0x1000`.
 nix develop
 just build           # cargo build --release
 just test            # static + dynamic checks -- see "Testing" below
-just run-pcsx2       # boot tools/hello in PCSX2 (pcsx2-qt under the hood)
+just run-pcsx2       # boot tools/hello in PCSX2 (needs a BIOS dump)
 just debug-qemu      # boot tools/hello under qemu + interactive gdb
 just size            # section sizes (cargo-binutils)
 just objdump         # disassembly (cargo-binutils)
 ```
 
-PCSX2 needs a legally-obtained BIOS dump configured (first-run setup wizard,
-or `pcsx2-qt -setupwizard`) before it can boot anything, ELF included —
-that's on you to provide, nixpkgs obviously doesn't ship one.
+Anything involving PCSX2 needs a legally-obtained BIOS dump — drop one in
+`bios_dump/` (gitignored, since it's copyrighted Sony code and not
+redistributable; nixpkgs obviously doesn't ship one). The scripts
+configure PCSX2 themselves from there, into a `.pcsx2/` directory in the
+repo, so none of this touches your own `~/.config/PCSX2`.
 
 Cargo commands must be run from the workspace root — the linker script path
 in `.cargo/config.toml` is relative.
 
 ## Testing
 
-`just test` runs two layers, neither of which needs a BIOS dump.
+`just test` runs three layers, each of which can see things the one
+before it can't. The first two need no BIOS dump; the third skips
+loudly without one.
 
-**`just test-static`** confirms each built ELF's structure (entry point,
-`_gp`/`_stack_top` formulas, bss size, `.got` contents) still matches
-what was manually verified with `readelf`/`nm` when this was scaffolded,
-plus tool-specific checks (`scripts/verify-solid-color.sh` pins the
-hand-written BIOS syscall stub's compiled bytes).
+**`just test-static`** checks each built ELF's structure — ELF class,
+entry point, `_gp`/`_stack_top` formulas, bss size, `.got` contents —
+plus tool-specific checks (`verify-solid-color.sh` pins the hand-written
+BIOS syscall stub's compiled bytes).
 
-**`just test-qemu`** actually executes the unmodified release ELFs under
+**`just test-qemu`** executes the unmodified release ELFs under
 `qemu-system-mips64el` and asserts what they did: that they reach their
 terminal state rather than panicking or hanging, that `$gp`/`$sp` match
-the linker script, that `boot.rs`'s `zero_bss` really zeroes bss (checked
-by dirtying the whole range *before* boot, so the check can't pass
-vacuously), and that each tool's proof-of-life word lands correctly —
-which for `alloc-hello` means the bump allocator handed out usable
-memory. `just debug-qemu <tool>` is the interactive version.
+the linker script, that `boot.rs`'s `zero_bss` really zeroes bss
+(checked by dirtying the whole range *before* boot, so it can't pass
+vacuously), and that each tool's proof-of-life word lands. This works
+because `link.ld` loads at `0x00100000` with `PhysAddr == VirtAddr`, and
+a MIPS CPU at reset (`Status.ERL = 1`) identity-maps kuseg to physical
+RAM — so qemu runs the real image with no test-only build.
+`just debug-qemu <tool>` is the interactive version.
 
-This works because `link.ld` loads at `0x00100000` with
-`PhysAddr == VirtAddr`, and a MIPS CPU at reset (`Status.ERL = 1`)
-identity-maps kuseg to physical RAM, so qemu can run the image with no
-test-only build.
+**`just test-pcsx2`** runs each ELF on an actual PS2: PCSX2 with a real
+BIOS. It asserts PCSX2's loader accepts the ELF, that it starts at the
+expected entry point, that the proof-of-life value arrives (read over
+PCSX2's PINE socket, not by eye), and that the BIOS kernel reports no
+TLB miss.
 
-> **Do not read a green `just test-qemu` as "this would run on a PS2".**
-> It currently would not: the ELFs are ELF64, and PCSX2's loader is
-> ELF32-only — it segfaults on them. qemu's generic ELF loader is
-> simply more permissive than any real PS2 loader. See docs/progress.md
-> 2026-11-27 ("a real BIOS arrives") for that and two other assumptions
-> that running on actual PCSX2 invalidated.
+**Only the third layer proves anything about a PlayStation 2.** This
+isn't theoretical: on 2026-11-27 the first two were fully green while
+the ELFs were ELF64 — unloadable by every real PS2 loader, and enough
+to *segfault* PCSX2 — and wrote their results to an address that faults
+on hardware. qemu's generic ELF loader is simply more permissive than a
+PS2's.
 
-**qemu is not a PS2, and a green `just test-qemu` is not evidence that
-anything works on one.** It has no GS (so `solid-color`'s actual claim —
-the screen turning red — is still unverified), no BIOS (so no syscall can
-complete), and none of the R5900's specifics: the 128-bit MMI
-instructions, the non-IEEE-754 FPU, scratchpad RAM, cache behaviour, DMA,
-the GIF, VU0/VU1, SIF/IOP. Code relying on any of those passes here and
-fails on hardware. The header of `scripts/lib-qemu.sh` has the full list;
-`docs/next-steps.md` #1 covers what's left.
+qemu also has no GS, no BIOS (so no syscall can complete), and none of
+the R5900's specifics: 128-bit MMI instructions, the non-IEEE-754 FPU,
+scratchpad RAM, cache behaviour, DMA, the GIF, VU0/VU1, SIF/IOP. The
+header of `scripts/lib-qemu.sh` has the full list. And PCSX2 is not a
+console either — see `docs/next-steps.md` #2 for a case where that
+distinction may already matter.
 
 `cargo test` does not work in this workspace: `.cargo/config.toml`'s
 global `build-std = ["core", "alloc"]` (required for the no-std PS2 target)
@@ -142,15 +154,16 @@ variant (128-bit "paired" GPRs for multimedia instructions, FPU is
 single-precision only and not IEEE-754 compliant) and LLVM's generic MIPS
 backend knows nothing about any of that. Specifically unverified/TODO:
 
-- **No display/console output yet.** `tools/hello` only proves the CPU
-  reached Rust code, by writing a magic value to a fixed RAM address
-  (`0x1000`) — `just test-qemu` asserts it landed, or check by hand via
-  PCSX2's memory viewer or a GDB `x` command. `tools/solid-color`
-  attempts a solid red screen without touching the GIF at all (by
-  forcing the PCRTC's merge circuit to take 100% of its color from
-  `BGCOLOR`), but whether that actually works is unverified — it needs a
-  BIOS. Driving the GS properly (writing GIF packets to set up a display
-  buffer) is real, nontrivial work and intentionally not faked here.
+- **No display/console output yet — and this is now the main open
+  problem.** `tools/hello` only proves the CPU reached Rust code, by
+  publishing a magic value through `ps2_rt::set_proof`.
+  `tools/solid-color` attempts a solid red screen without touching the
+  GIF at all (forcing the PCRTC's merge circuit to take 100% of its
+  color from `BGCOLOR`). As of 2026-11-27 it runs end to end on a real
+  PS2 — the BIOS `SetGsCrt` call returns, all four GS registers are
+  written — and **the screen stays black**. See `docs/next-steps.md` #2
+  for the open leads. Driving the GS properly (GIF packets over DMA) is
+  the fallback and is real, nontrivial work.
 - **`$gp`/`_gp` setup is defensive, possibly unnecessary.** With
   `+noabicalls` and a static relocation model, generated code should mostly
   use absolute addressing; this is just a safety net. (It does at least

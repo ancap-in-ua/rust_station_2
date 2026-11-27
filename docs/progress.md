@@ -741,3 +741,134 @@ The target spec needs to emit ELF32 before any of this can run on real
 hardware. That is a pointer-width change (64 → 32), not a flag tweak,
 and it touches the target JSON, `link.ld`'s assumptions, the proof-of-
 life convention from #2, and every expectation in `verify-elf.sh`.
+
+## 2026-11-27 (later) — re-targeted to ELF32/o32; it runs on a real PS2
+
+Acted on the previous entry. The target is now 32-bit, the tools boot on
+PCSX2 with a real BIOS, and `just test-pcsx2` asserts it. Also:
+**one of the three findings in that entry was wrong**, and the
+correction is the most interesting part of this one.
+
+### Correction: the BIOS syscall works fine
+
+The previous entry concluded that `ps2_rt::syscall::set_gs_crt` hangs
+and never returns, based on a hand-assembled ELF32 probe that wrote
+`0x1111` before the `syscall` and `0x2222` after, and only ever showed
+the first.
+
+That probe was broken. It kept the marker base address in `$t0` and the
+marker value in `$t1` across the `syscall` — **both caller-saved** in
+o32. The BIOS handler clobbers them, as it is entitled to, so the
+"after" store went to whatever garbage address `$t0` held by then. The
+syscall had returned normally every time; the instruction meant to
+record that fact is what failed.
+
+Caught it by accident: once the real Rust `solid-color` was running
+(the Rust `_start`/ABI code saves and restores registers properly, as
+compiled code does), its post-syscall proof value appeared immediately.
+
+Worth keeping in mind for future hand-written probes: anything written
+in raw assembly around a BIOS call must treat `$t0`-`$t9`, `$a0`-`$a3`
+and `$v0`-`$v1` as destroyed. Compiled Rust gets this right for free,
+which is exactly why the bug only showed up in the hand-written test
+and not in the real artifact it was supposed to be modelling.
+
+So the 2026-11-26 syscall research was correct after all: syscall `2` in
+`$v1`, arguments in `$a0`-`$a2`, four-instruction stub.
+
+### The target spec is now ELF32/o32
+
+`targets/mips64r5900el-ps2.json` → `targets/mipsel-sony-ps2.json`
+(renamed to match the built-in `mipsel-sony-psx` naming, and because
+"mips64" was the bug). Built from rustc's `mipsel-unknown-none` rather
+than from the old n64 spec:
+
+```
+ arch                  mips64 -> mips
+ cpu                   mips3     (unchanged -- EE has no MIPS32r2 ext/ins/rotr)
+ features              +mips3,+single-float,+noabicalls
+ llvm-abiname          n64    -> o32
+ target-pointer-width  64     -> 32
+ data-layout           e-m:m-p:32:32-i8:8:32-i16:16:32-i64:64-n32-S64
+```
+
+LLVM accepts `mips3` with o32 — the same combination ee-gcc uses, and
+the same shape as N64 toolchains (64-bit CPU, 32-bit pointers). The
+resulting ELF header is exactly what a PS2 expects:
+
+```
+Class: ELF32   Flags: 0x20001101, noreorder, 32bitmode, o32, mips3
+```
+
+Knock-on changes: `#[cfg(target_arch = "mips64")]` → `"mips"` in
+`boot.rs`/`syscall.rs` (these silently compiled *everything* out
+otherwise — the first build after the switch produced an "unused import:
+global_asm" warning and an ELF with no `_start`, which is the only
+reason it got noticed); `usize` is now 4 bytes, so the allocator cursor
+shrank; `.got` is two 4-byte reserved entries (`0x80000000`) instead of
+two 8-byte ones; `.MIPS.options` is gone.
+
+### Proof-of-life now lives in the tool's own image
+
+`ps2_rt::PS2_RT_PROOF`, a `static` written through
+`ps2_rt::set_proof()`, replaces the hardcoded `0x1000`. The loader maps
+the image it loaded, so this is memory we are actually entitled to
+write — no kseg0/kseg1 prefix, nothing to collide with, and it works
+identically under qemu and PCSX2. Harnesses resolve it by symbol with
+`nm` rather than hardcoding an address.
+
+### It runs
+
+`scripts/verify-pcsx2.sh` (+ `lib-pcsx2.sh`, `pine.py`, `just
+test-pcsx2`) boots each ELF on PCSX2 with the real BIOS and asserts over
+PINE. All three tools pass:
+
+- `hello` — `PS2_RT_PROOF = 0xc0ffee42`.
+- `alloc-hello` — `0xa110008c`, and the heap read back over PINE shows
+  the bump allocator's signature exactly as it did under qemu: the dead
+  4-element `Vec` (`0,1,4,9`) unreclaimed, then the live 8-element one
+  (`0,1,4,9,0x10,0x19,0x24,0x31`). The allocator works on a PS2.
+- `solid-color` — `0x5011d000`, meaning the `SetGsCrt` syscall returned
+  and all four GS register writes executed.
+
+No TLB misses anywhere, which the harness now checks explicitly: it is
+the signal that a tool touched memory the EE kernel never mapped for it,
+and it is what the old `0x1000` convention tripped on every run.
+
+`just test` is now three layers — `test-static`, `test-qemu`,
+`test-pcsx2` — 62 checks. The PCSX2 layer skips loudly (not silently)
+when `bios_dump/` is empty, so the repo still works for anyone without
+a dump.
+
+Also fixed: `scripts/run-pcsx2.sh` was `pcsx2-qt -elf "$elf" -fastboot`,
+which boots **nothing**. `-elf` only overrides the boot ELF; the file
+must be a positional argument, and PCSX2 ignores any file not ending in
+`.elf` (both confirmed by testing). It had been wrong since the initial
+scaffold, invisibly, because there was never a BIOS to run it with. A
+symlink to a `.elf` name is not sufficient either — PCSX2 boots garbage
+from one and ends up executing at address 0; the harness copies the
+bytes.
+
+### What's still not working: the screen is black
+
+`solid-color` now runs end to end on a real PS2 and the display stays
+**100% black** — not red.
+
+This is finally a real test of the PMODE-blend hypothesis rather than a
+blocked one, and the hypothesis is not behaving as the GS User's Manual
+reading predicted. Checked that the capture pipeline isn't lying by
+booting the BIOS itself and capturing that: it comes back with the boot
+screen's colors (center pixel `rgb(0,95,140)`), so black means black.
+
+Open questions for whoever picks this up, roughly in order of
+suspicion:
+
+- `SMODE2` is never written. `ps2_rt::gs` defines `REG_SMODE2`
+  ("interlace, field mode, display enable") and `solid-color` doesn't
+  touch it. If `SetGsCrt` doesn't leave the display enabled, nothing
+  reaches the CRTC regardless of what the merge circuit computes.
+- Whether PCSX2's PCRTC emulation implements the `SLBG`/`MMOD`/`ALP`
+  path when circuit 1 points at VRAM that was never written. A real GS
+  might behave differently; this is exactly the kind of exotic corner
+  an emulator is allowed to get wrong.
+- Whether the `ALP = 0` reading of the blend equation is inverted.

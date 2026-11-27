@@ -22,8 +22,6 @@ use alloc::vec::Vec;
 
 use ps2_rt as _; // pulls in the panic handler, allocator, and _start
 
-const PROOF_OF_LIFE_ADDR: usize = 0x0000_1000;
-
 #[no_mangle]
 extern "C" fn rust_main() -> ! {
     let mut v: Vec<u32> = Vec::new();
@@ -32,8 +30,6 @@ extern "C" fn rust_main() -> ! {
     }
     let sum: u32 = v.iter().sum(); // 0+1+4+9+16+25+36+49 = 140 = 0x8c
 
-    unsafe {
-        core::ptr::write_volatile(PROOF_OF_LIFE_ADDR as *mut u32, 0xA110_0000 | sum);
-    }
+    ps2_rt::set_proof(0xA110_0000 | sum);
     ps2_rt::ps2_rt_halt()
 }

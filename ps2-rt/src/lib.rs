@@ -10,6 +10,31 @@ pub mod syscall;
 
 use core::panic::PanicInfo;
 
+/// Where a tool leaves a value for a debugger/test harness to find,
+/// standing in for the console output this project doesn't have yet.
+///
+/// Deliberately a `static` in the tool's own image rather than a fixed
+/// low address like `0x1000`, which is what the tools used until
+/// 2026-11-27. On a real PS2 that address is unusable: the first MiB
+/// belongs to the BIOS kernel and a user-mode ELF has no TLB mapping
+/// for it, so the store faults (`TLB Miss, pc=0x100000 addr=0x1000
+/// [store]`) -- see docs/progress.md. The loader maps the image it
+/// loaded, so this is memory we are actually entitled to write, with no
+/// kseg0/kseg1 prefix games and nothing to collide with.
+///
+/// Harnesses find it by symbol name (`nm`), not by a hardcoded address.
+#[no_mangle]
+pub static mut PS2_RT_PROOF: u32 = 0;
+
+/// Publish a proof-of-life value. Volatile so it survives optimization
+/// in a tool whose only other act is to spin forever.
+#[inline(never)]
+pub fn set_proof(value: u32) {
+    unsafe {
+        core::ptr::write_volatile(&raw mut PS2_RT_PROOF, value);
+    }
+}
+
 /// Tag values identifying which terminal state a spinning tool is in.
 /// Passed to [`spin_forever`] in `$a0`, so they're readable from a
 /// debugger even with no symbols loaded.
