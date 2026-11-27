@@ -17,6 +17,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "fb-fill"
+version = "0.1.0"
+dependencies = [
+ "ps2-rt",
+]
+
+[[package]]
 name = "hello"
 version = "0.1.0"
 dependencies = [

@@ -46,7 +46,10 @@ test-static: build
     # 4 bytes of bss: ps2_rt's PS2_RT_PROOF, the proof-of-life slot.
     ./scripts/verify-elf.sh target/mipsel-sony-ps2/release/hello 4
     ./scripts/verify-elf.sh target/mipsel-sony-ps2/release/solid-color 4
-    ./scripts/verify-elf.sh target/mipsel-sony-ps2/release/color-cycle 4
+    # color-cycle / fb-fill: PS2_RT_PROOF (4) + a 12-quadword GIF packet
+    # (192 bytes) in bss for the DMAC to read.
+    ./scripts/verify-elf.sh target/mipsel-sony-ps2/release/color-cycle "$((4 + 192))"
+    ./scripts/verify-elf.sh target/mipsel-sony-ps2/release/fb-fill "$((4 + 192))"
     ./scripts/verify-solid-color.sh target/mipsel-sony-ps2/release/solid-color
     # alloc-hello: PS2_RT_PROOF (4) + 12 bytes padding to align
     # ps2_rt::heap's HEAP to 16 + HEAP itself (64 KiB) + BumpAllocator's
@@ -86,3 +89,7 @@ test-pcsx2: build
     # its pre-loop setup is assertable -- which is the point: reaching
     # the loop at all means the PCRTC bring-up ran.
     ./scripts/verify-pcsx2.sh target/mipsel-sony-ps2/release/color-cycle 0xc0c00000
+    # fb-fill actually draws: a full-screen sprite via GIF/DMA. Its
+    # proof value is published only after the DMA has drained, so this
+    # also covers the transfer completing.
+    ./scripts/verify-pcsx2.sh target/mipsel-sony-ps2/release/fb-fill 0xfbf11100

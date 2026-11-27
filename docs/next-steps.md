@@ -28,86 +28,59 @@ progress.md 2026-11-27 (both entries):
 
 What's left for this item is only the hardware this environment can't
 reach: a real console. And PCSX2 is not a console — that distinction
-has stopped being theoretical, see #2: the solid-colour milestone is
-now blocked on an emulation gap PCSX2 documents in its own source.
+has stopped being theoretical: the PCRTC merge-circuit approach in
+`tools/solid-color` cannot be rendered by PCSX2 at all (#2), which is
+what forced the GIF/DMA drawing path. That path then worked, so the gap
+cost a detour rather than the milestone.
 
 A BIOS dump goes in `bios_dump/` (gitignored — copyrighted, not
 redistributable). Without one, `test-static` and `test-qemu` still run
 and `test-pcsx2` skips loudly.
 
-## 2. Minimal GS output — the real first milestone
+## 2. Minimal GS output — DONE under emulation (2026-11-27)
 
-**Status: `solid-color` is as correct as PCSX2 can tell, and PCSX2
-structurally cannot render what it asks for.** Deciding whether the
-approach actually works now needs real hardware — or a different
-approach. See progress.md 2026-11-27 (third entry).
+**The screen is red.** `tools/fb-fill` draws a full-screen sprite via a
+GIF packet over DMA and PCSX2 renders it; `tools/color-cycle` animates
+red/green/blue on the same path. See progress.md 2026-11-27 (fifth
+entry).
 
-What is known:
+This went the long way round. The PCRTC merge-circuit shortcut
+(`tools/solid-color`) turned out to be unrenderable in PCSX2 —
+`GSRenderer::Merge` returns without presenting a frame when no read
+circuit has a framebuffer texture, which is exactly what a tool that
+never writes VRAM produces. Drawing real pixels was filed as the
+"fallback" and was in fact the only route.
 
-- The tool runs end to end on PCSX2 with a real BIOS: `SetGsCrt`
-  returns, CSR/IMR/SMODE2/DISPFB1/DISPLAY1/BGCOLOR/PMODE are all
-  written in ps2sdk's own order, it publishes `0x5011d000` and halts.
-  `just test-pcsx2` asserts all of that.
-- The screen is nevertheless 100% black, and **that is a PCSX2
-  limitation, not evidence about the approach.** `GSRenderer::Merge`
-  returns without presenting a frame when neither read circuit has a
-  framebuffer texture, which is exactly our case since we deliberately
-  never write a pixel to VRAM. PCSX2's own comment on that early-out
-  reads "Both circuits off still outputs BGCOLOR on real hardware."
-  Also tried with both circuits disabled: still black.
+Fixed along the way (progress.md has the detail): `SetGsCrt`'s mode
+argument was a table index rather than the mode value; CSR reset, IMR
+and SMODE2 were never written; and every GS register write was
+compiling to a pair of 32-bit `sw`s instead of one `sd`.
 
-Fixed along the way (progress.md has the detail):
+What's left here:
 
-- **`SetGsCrt`'s mode argument was wrong** — we passed ps2sdk's
-  `GRAPH_MODE_*` constant, which is an *index* into `graph_mode[]`. The
-  value the syscall wants is that row's `.mode` field (`0x02` NTSC,
-  `0x03` PAL — libgs's `GS_MODE_*`). `gs::VideoMode` now bundles the
-  geometry and the mode value in one struct so they can't be taken
-  from different places again.
-- **CSR reset, IMR and SMODE2 were never written.** ps2sdk's
-  `graph_set_mode` does all three before/around `SetGsCrt`; we now do
-  the same, via `gs::init_display`.
-- **Every GS register write was two 32-bit stores, not one `sd`.**
-  Introduced by the o32 re-target and invisible to every check in the
-  suite — see #3.
+- **Run `color-cycle` on a console.** Much more meaningful now: it no
+  longer depends on the unverifiable BGCOLOR path, so it exercises the
+  same code that demonstrably works under emulation. Needs #5.
+- `tools/solid-color` keeps the PCRTC trick. Still unjudgeable on
+  PCSX2, still worth a look if anyone runs it on hardware.
+- **Double buffering and VSync.** Nothing currently waits for a
+  vertical blank; `color-cycle` just busy-loops. Fine for flat fills,
+  not for anything that moves.
 
-What got resolved earlier and shouldn't be re-litigated:
+## 2a. Text output on screen (next, and the thing that unblocks the rest)
 
-- "How does the EE even address `0x12000000`?" — identity-mapped, no
-  segment prefix needed (ps2tek's EE memory map, re-confirmed on PCSX2:
-  a raw store there from a user-mode ELF takes no TLB miss).
-- "Where do NTSC/PAL sync-timing constants come from?" — they don't;
-  the GS Users Manual says that's a BIOS kernel service
-  (`ps2_rt::syscall::set_gs_crt`), not something application code
-  hand-derives.
-- PMODE/BGCOLOR/DISPFB/DISPLAY bit layouts — confirmed against the GS
-  Users Manual directly. Note the *bit layouts* are confirmed; "they
-  add up to a red screen" is precisely what remains unconfirmed.
+With a framebuffer that demonstrably draws, text is a font blitted into
+it. Two routes: a glyph-per-sprite loop using the primitives already in
+`ps2_rt::draw`, or uploading a font texture to VRAM and drawing
+textured sprites. The first needs no new GIF modes and is the obvious
+starting point.
 
-Two ways forward, answering different questions:
-
-1. **Run it on a real console** (needs #5, deployment). The only thing
-   that can settle whether the PMODE/BGCOLOR trick works. Everything
-   needed is prepared: the ELF is loadable, the display is configured
-   for **PAL** (the only console and BIOS available are European, and
-   an NTSC signal would make a black screen ambiguous), and
-   `tools/color-cycle` exists specifically so the result is
-   unambiguous — a changing screen proves booted + syscall returned +
-   PCRTC live + BGCOLOR reaching the display, where a static black
-   screen proves only that something upstream is wrong. **Run
-   `color-cycle` first.**
-2. **Put actual pixels in VRAM via GIF/DMA.** This was filed as the
-   "fallback"; it is now the only route to a visible result *under
-   emulation*, because PCSX2 needs a real framebuffer texture before it
-   composites anything. It is also what every real PS2 program does, so
-   it has to happen eventually regardless.
-
-   Substantially bigger than anything so far: GIF packet construction
-   (a GIFtag plus register writes), driving a DMA channel to the GIF,
-   and VRAM addressing — with no C library to crib conventions from.
-   ps2sdk's `ee/draw` and `ee/dma` are the reference to read first, and
-   the lesson from the mode-number bug applies: read the *call site*,
-   not just the constant next to it.
+This matters more than it looks. Debugging is currently "write one u32
+to `PS2_RT_PROOF` and read it over PINE" — fine for one value, useless
+for anything structured. On-screen text is also the only output channel
+that works on the user's actual console (no serial port on a Slim, see
+2b). Everything after this — a menu, a file browser, a launcher — needs
+it.
 
 ## 2b. Text output over EE SIO (small, unblocks everything else)
 
@@ -117,9 +90,10 @@ config). It is a plain memory-mapped register write, the same mechanism
 as `gs::write_reg`, so it needs no GS, no DMA, no VRAM and no BIOS
 call.
 
-That would give the project its first real `print!`, replacing the
-current one-`u32`-read-over-PINE debugging. Worth doing before the
-GIF/DMA work, which is much easier to debug with printing than without.
+This would give a host-side log channel, which is complementary to #2a
+rather than a substitute: on-screen text is what works on the console,
+SIO is what's convenient while iterating in PCSX2. Lower priority than
+#2a for that reason.
 
 Two caveats: one source suggests PCSX2 only prints SIO in debug builds
 or interpreter mode (unverified — cheap to test). And it does **not**

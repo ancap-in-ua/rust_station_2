@@ -1131,3 +1131,98 @@ PCSX2's config has `EnableEEConsole` and `EnableEESIOInput`, which is
 the lead for the text-output work (EE SIO at `0x1000_F180`). Not
 touched yet. Worth knowing it won't help on real hardware: the Slim has
 no exposed serial port, so SIO output there needs a physical cable mod.
+
+## 2026-11-27 (fifth) — pixels on screen, at last: GIF packets over DMA
+
+**The screen is red.** Not via the PCRTC merge-circuit trick, which
+PCSX2 cannot render, but by actually drawing: a full-screen sprite
+handed to the GS as a GIF packet over DMA channel 2. First visible
+output this project has ever produced.
+
+Verified by capturing the framebuffer: `center pixel: (255, 0, 0)`,
+74.4% of a 1920x1080 fullscreen capture pure red, with the remaining
+25.3% black — exactly the letterboxing a 640x256 PAL buffer gets in a
+16:9 window.
+
+### Why this had to happen now rather than later
+
+It was filed as next-steps.md #2's "fallback" since the project started.
+It stopped being optional once PCSX2's `GSRenderer::Merge` turned out to
+return without presenting a frame when no read circuit has a framebuffer
+texture (fourth entry today). Under emulation there is no way to see
+anything without real pixels in VRAM — and since that's what every
+actual PS2 program does, the "shortcut" was never going to survive
+contact with hardware either.
+
+### The drawing side of the GS is a different machine
+
+Worth stating plainly because it cost some confusion: the PCRTC
+registers (`PMODE`, `DISPFB1`, `BGCOLOR`, ...) are memory-mapped at
+`0x1200_0000` and you write them with `sd`. The *drawing* registers
+(`PRIM`, `RGBAQ`, `XYZ2`, `FRAME_1`, `SCISSOR_1`, ...) are **not
+memory-mapped at all** — they're addressed by 8-bit index inside a
+packet fed to the Graphics Interface. Same chip, two completely
+different access paths.
+
+### What was built
+
+- `ps2-rt/src/gif.rs` — `Qword` (16-byte aligned, which DMA requires),
+  the GIFtag packer, and `send()`, which drives DMA channel 2
+  (`CHCR`/`MADR`/`QWC` at `0x1000_a000`) and polls `STR` until the
+  transfer drains.
+- `ps2-rt/src/draw.rs` — `build_fill`/`fill_screen`: the drawing
+  environment plus a two-vertex sprite covering the screen.
+- `ps2-rt/src/gs.rs` — GS *general* register indices and packers
+  (`frame`, `zbuf`, `xyoffset`, `scissor`, `test_depth_always`, `prim`,
+  `rgbaq`, `xyz2`, `fixed12_4`).
+- `ps2_rt::syscall::flush_data_cache` — BIOS `FlushCache(0)`, syscall
+  100.
+- `tools/fb-fill` — static fill. `tools/color-cycle` rewritten onto the
+  same path, so it now animates under emulation instead of relying on
+  BGCOLOR.
+
+Only one GIF packet shape is implemented: `PACKED` mode with a single
+`A+D` register descriptor (`0x0E`), where each data quadword is
+`{ value, register_index }`. That one shape can set any general register
+and issue any primitive, which covers everything needed so far without
+hand-rolling GIF's other modes speculatively.
+
+### Two things that would have silently broken it
+
+- **Cache coherency.** The EE's data cache is write-back and the DMAC
+  reads physical RAM, so a packet built in a `static` is invisible to
+  the hardware until written back. `gif::send` calls `FlushCache(0)`
+  first — the same thing ps2sdk's `ee/dma/src/dma.c` does around its
+  transfers. Without it the GIF would read stale memory, which fails in
+  a way that looks like "the packet is wrong".
+- **Depth test.** The GS User's Manual prohibits `ZTE = 0`, so "no
+  depth buffer" is spelled `ZTE = 1` with `ZTST = ALWAYS`, plus
+  `ZMSK = 1` to mask Z writes. Getting this wrong rejects every pixel
+  and looks identical to not drawing at all.
+
+### Animation confirmed, with a caveat about the capture method
+
+`color-cycle` screenshotted at ~0.9s intervals gives
+`black, green, green, red, red, black`. Red and green are unambiguous.
+The blacks are **capture artifacts, not rendering failures** — a static
+blue fill via `fb-fill` renders correctly (`(0, 0, 255)` at 74.4%), so
+blue is fine; `spectacle` is evidently grabbing the compositor
+mid-swap while PCSX2 is fullscreen. Worth remembering before reading
+anything into a single black capture: confirm with a static fill before
+concluding a colour doesn't work.
+
+### Where this leaves the roadmap
+
+The milestone that has been open since the project started is done
+*under emulation*. What it unlocks:
+
+- **Text.** With a framebuffer that demonstrably draws, text is a font
+  blitted into it — either as sprites per glyph or by uploading a font
+  texture to VRAM. This is the next thing worth building, and it's what
+  turns debugging from "read one u32 over PINE" into something usable.
+- **The hardware test is now much stronger.** `color-cycle` no longer
+  depends on the unverifiable BGCOLOR path, so running it on a console
+  tests the same code that demonstrably works in PCSX2. A black screen
+  there would mean something specific rather than something unknown.
+- `tools/solid-color` stays as-is: the PCRTC trick, still unjudgeable
+  on PCSX2, still interesting if anyone ever runs it on hardware.

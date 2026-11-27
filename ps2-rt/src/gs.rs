@@ -144,6 +144,98 @@ pub unsafe fn init_display(mode: &VideoMode, width: u16) {
 /// `PSM` encoding for 32-bit RGBA.
 pub const PSMCT32: u8 = 0;
 
+// ---------------------------------------------------------------------
+// GS *general* registers.
+//
+// Everything above this point is the PCRTC: the display-output side,
+// reached by storing to memory-mapped privileged addresses. The
+// registers below are the drawing side, and they are NOT memory-mapped
+// -- they're addressed by index inside a GIF packet (see `ps2_rt::gif`).
+// Indices and bit layouts from ps2sdk's common/include/gs_gp.h
+// (`GS_REG_*` / `GS_SET_*`), cross-checked against the GS User's Manual.
+// ---------------------------------------------------------------------
+
+pub const GS_PRIM: u8 = 0x00;
+pub const GS_RGBAQ: u8 = 0x01;
+pub const GS_XYZ2: u8 = 0x05;
+pub const GS_XYOFFSET_1: u8 = 0x18;
+pub const GS_PRMODECONT: u8 = 0x1a;
+pub const GS_SCISSOR_1: u8 = 0x40;
+pub const GS_COLCLAMP: u8 = 0x46;
+pub const GS_TEST_1: u8 = 0x47;
+pub const GS_FRAME_1: u8 = 0x4c;
+pub const GS_ZBUF_1: u8 = 0x4e;
+
+/// Primitive type for `PRIM`: a sprite (axis-aligned rectangle) takes
+/// exactly two vertices, which makes it the cheapest way to fill a
+/// region.
+pub const PRIM_SPRITE: u16 = 6;
+
+/// Packs `FRAME_1/2`: which framebuffer the drawing pipe writes to.
+/// `base` is in units of 2048 words (8192 bytes), `width` in units of
+/// 64 pixels -- the same units `dispfb` uses, since the display circuits
+/// and the drawing pipe address the same VRAM.
+pub const fn frame(base: u16, width: u8, pixel_format: u8, mask: u32) -> u64 {
+    (base as u64 & 0x1ff)
+        | (width as u64 & 0x3f) << 16
+        | (pixel_format as u64 & 0x3f) << 24
+        | (mask as u64) << 32
+}
+
+/// Packs `ZBUF_1/2`. `mask = true` disables Z writes, which is what a
+/// tool with no depth buffer wants.
+pub const fn zbuf(base: u16, pixel_format: u8, mask: bool) -> u64 {
+    (base as u64 & 0x1ff) | (pixel_format as u64 & 0xf) << 24 | (mask as u64) << 32
+}
+
+/// Packs `XYOFFSET_1/2`, the offset subtracted from primitive
+/// coordinates. Zero means vertex coordinates are screen coordinates in
+/// 12.4 fixed point, which is the simplest thing to reason about.
+pub const fn xyoffset(x: u16, y: u16) -> u64 {
+    (x as u64) | (y as u64) << 32
+}
+
+/// Packs `SCISSOR_1/2`. Bounds are inclusive pixel coordinates.
+pub const fn scissor(x0: u16, x1: u16, y0: u16, y1: u16) -> u64 {
+    (x0 as u64 & 0x7ff)
+        | (x1 as u64 & 0x7ff) << 16
+        | (y0 as u64 & 0x7ff) << 32
+        | (y1 as u64 & 0x7ff) << 48
+}
+
+/// Packs `TEST_1/2`'s depth-test fields. The GS User's Manual
+/// prohibits disabling the depth test outright (`ZTE = 0`), so "no
+/// depth testing" is spelled `ZTE = 1` with method `ALWAYS`.
+pub const fn test_depth_always() -> u64 {
+    const ZTE: u64 = 1 << 16;
+    const ZTST_ALWAYS: u64 = 1 << 17;
+    ZTE | ZTST_ALWAYS
+}
+
+/// Packs `PRIM`: primitive type plus the per-primitive feature flags
+/// (all off here -- no gouraud, texture, fog, alpha blending or
+/// antialiasing).
+pub const fn prim(kind: u16) -> u64 {
+    kind as u64 & 0x7
+}
+
+/// Packs `RGBAQ`. `alpha` is GS-style, where `0x80` is 1.0.
+pub const fn rgbaq(r: u8, g: u8, b: u8, alpha: u8) -> u64 {
+    (r as u64) | (g as u64) << 8 | (b as u64) << 16 | (alpha as u64) << 24
+}
+
+/// Packs `XYZ2`, a vertex that also kicks the primitive. `x`/`y` are
+/// 12.4 fixed point -- see [`fixed12_4`].
+pub const fn xyz2(x: u16, y: u16, z: u32) -> u64 {
+    (x as u64) | (y as u64) << 16 | (z as u64) << 32
+}
+
+/// Converts whole pixels to the 12.4 fixed-point form vertex
+/// coordinates use.
+pub const fn fixed12_4(pixels: u16) -> u16 {
+    pixels << 4
+}
+
 /// Writes a GS privileged register. `addr` must be one of the `REG_*`
 /// constants above (or another address in the privileged range) and the
 /// write must be a single 64-bit store -- these registers are not

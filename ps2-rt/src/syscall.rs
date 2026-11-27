@@ -38,6 +38,13 @@ set_gs_crt:
     syscall
     jr    $31
     nop
+
+    .global flush_cache
+flush_cache:
+    li    $3, 100
+    syscall
+    jr    $31
+    nop
     .set reorder
     "#
 );
@@ -56,6 +63,30 @@ unsafe extern "C" {
     /// anything sane) and that reinitializing the PCRTC is valid for
     /// whatever display state currently exists.
     pub fn set_gs_crt(interlace: i16, mode: i16, field: i16);
+}
+
+#[cfg(target_arch = "mips")]
+unsafe extern "C" {
+    /// BIOS syscall `0x64` (100), `FlushCache(int operation)`.
+    /// Operation 0 writes back the EE's data cache.
+    ///
+    /// # Safety
+    /// Requires an intact BIOS syscall table, same as [`set_gs_crt`].
+    pub fn flush_cache(operation: i32);
+}
+
+/// Writes back the data cache so DMA sees what we wrote.
+///
+/// The EE's data cache is write-back and the DMAC reads physical RAM
+/// directly, so a DMA packet built in a normal `static` is invisible to
+/// the hardware until this runs. ps2sdk does the same thing around its
+/// transfers (`FlushCache(0)` / `SyncDCache` in `ee/dma/src/dma.c`).
+#[cfg(target_arch = "mips")]
+pub fn flush_data_cache() {
+    const WRITEBACK_DCACHE: i32 = 0;
+    unsafe {
+        flush_cache(WRITEBACK_DCACHE);
+    }
 }
 
 /// `display_mode` values for `set_gs_crt`.

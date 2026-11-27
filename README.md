@@ -11,14 +11,18 @@ custom LLVM target spec since rustc has no built-in PS2 target.
   not optional — PCSX2's loader segfaults on ELF64 (docs/progress.md
   2026-11-27).
 - `ps2-rt/` — runtime support crate: entry point (`_start`), linker script
-  (`link.ld`), bss zeroing, panic handler, bump allocator, GS/BIOS-syscall
-  plumbing. Every tool depends on this.
+  (`link.ld`), bss zeroing, panic handler, bump allocator, BIOS syscalls,
+  and graphics — `gs` (PCRTC display registers *and* the GS drawing
+  registers), `gif` (GIF packets + DMA to the GIF), `draw` (framebuffer
+  fills). Every tool depends on this.
 - `tools/hello/` — minimal example tool / template for new tools.
-  `tools/alloc-hello/` exercises the allocator; `tools/solid-color/`
-  attempts the solid-red-screen milestone; `tools/color-cycle/` is the
-  same thing cycling colours, which is the one to run on real hardware
-  (a *changing* screen is an unambiguous result where a static black
-  one isn't).
+  `tools/alloc-hello/` exercises the allocator. For graphics:
+  `tools/fb-fill/` fills the screen by drawing a sprite through a GIF
+  packet over DMA (this is the one that actually puts a colour on
+  screen), `tools/color-cycle/` animates red/green/blue on the same
+  path and is the one to run on real hardware, and
+  `tools/solid-color/` keeps the PCRTC merge-circuit shortcut that
+  PCSX2 can't render.
 - `scripts/` — three layers of checks: `verify-elf.sh` +
   `verify-solid-color.sh` (static), `verify-qemu.sh` +
   `verify-solid-color-qemu.sh` (run the ELF under qemu, no BIOS needed),

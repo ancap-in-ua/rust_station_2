@@ -4,6 +4,8 @@
 extern crate alloc;
 
 mod boot;
+pub mod draw;
+pub mod gif;
 pub mod gs;
 pub mod heap;
 pub mod syscall;
