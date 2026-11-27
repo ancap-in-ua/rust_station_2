@@ -575,3 +575,169 @@ is someone mistaking a green `just test-qemu` for "it works on a PS2":
 qemu was added to flake.nix (it had been present only by accident, via
 the host system, which would have made `just test` fail inside a clean
 `nix develop`).
+
+## 2026-11-27 — a real BIOS arrives, and three of our assumptions die
+
+A BIOS dump (`bios_dump/ps2-0220e-20060210.bin`, Europe v02.20
+(10/02/2006), recognized by PCSX2 as `Console 20060210-142424`) finally
+unblocked next-steps.md #1. PCSX2 is driven here with `-datapath` so all
+of its state lives in a scratch dir rather than the user's
+`~/.config/PCSX2`, and read back over **PINE**, PCSX2's IPC socket
+(`EnablePINE = true`, unix socket at `$XDG_RUNTIME_DIR/pcsx2.sock`),
+which allows scripted EE memory reads — no screenshots-and-squinting
+needed for memory claims.
+
+Nothing we built actually works on a PS2. Three separate assumptions,
+all previously "verified", turned out to be wrong, and the qemu harness
+from the entry above could not have caught any of them.
+
+### 1. The ELF is the wrong class. PCSX2's loader *crashes* on it.
+
+Booting `hello`:
+
+```
+(ELF) Size of section headers is not standard
+*************** Unhandled SIGSEGV at 0x5d158c5da8fe ***************
+  0x005d158c5da8fe _ZN9ElfObject18LoadSectionHeadersEv
+  0x005d158c69daf9 _ZN9VMManagerL13UpdateELFInfoE...
+```
+
+PCSX2's ELF loader is strictly **ELF32**: it reads the section header
+table assuming 40-byte ELF32 entries, our ELF64 entries are 64 bytes, it
+walks off the end and segfaults the emulator. Exit code 134 (SIGABRT via
+the crash handler). This is not a graceful "unsupported file" — our
+binary takes the host process down with it.
+
+PS2 ELFs are ELF32 by universal convention (ee-gcc/ps2sdk build
+`mips-r5900-elf` o32 objects). Our target spec asks for `mips64` + n64,
+which produces ELF64. `scripts/verify-elf.sh` has been *asserting* `ELF
+class == ELF64` as if it were a desired property since the initial
+scaffold. It was asserting the bug.
+
+Confirmed it is the only structural blocker by hand-assembling a minimal
+ELF32 with the same load address, entry point, and program header layout
+(`lui/ori/sw` of `0xC0FFEE42`, then spin — 5 instructions):
+
+```
+ELF Loading: host:min32.elf, Game CRC = D27C853B, EntryPoint = 0x00100000
+ELF host:min32.elf with entry point at 0x00100000 is executing.
+```
+
+It loads and runs. So: load address, entry convention, and program
+header layout are all fine; the ELF class is not.
+
+**Why qemu missed it:** `-device loader` is a generic ELF loader that
+handles ELF64 perfectly well. The previous entry's claim — "the same
+bytes load and run in both places, for the same reason" — is false. The
+same bytes run under qemu *because qemu is more permissive than any real
+PS2 loader*, not because the image is PS2-correct. That was the one
+thing the qemu harness most needed to be right about, and it was the
+thing it was structurally incapable of testing.
+
+### 2. The proof-of-life address `0x1000` is not writable. Never was.
+
+The very first thing the minimal ELF32 did was fault:
+
+```
+TLB Miss, pc=0x100000 addr=0x1000 [store]
+```
+
+The first MiB belongs to the BIOS kernel, and a user-mode ELF cannot
+reach it through kuseg — the EE kernel simply has no TLB entry mapping
+it for us. `link.ld`'s comment ("the MMU already set up so that low
+addresses map directly to physical RAM") is true only for the region the
+loader mapped for *our* image, not for arbitrary low addresses.
+
+The same store through kseg0 works:
+
+```
+0x1000     = 0x00000000     (via PINE -- unmapped, reads as zero)
+0x80001000 = 0xc0ffee42     (via PINE -- the store landed)
+```
+
+So `hello` and `alloc-hello`'s entire proof-of-life mechanism is
+invalid on hardware, and the README's standing instruction to "check
+address 0x00001000 in PCSX2's memory viewer" would have shown zero even
+if the ELF had loaded. Writes to a fixed physical address need a kseg0
+(`0x8000_0000`, cached) or kseg1 (`0xA000_0000`, uncached) prefix; the
+simpler fix is to write somewhere the program actually owns. Markers
+written into our own image at `0x100800` read back fine.
+
+### 3. The BIOS syscall never returns, so `solid-color` can't even start
+
+This one is **unresolved**, and it blocks the whole solid-color
+milestone.
+
+Traced by storing progress markers into our own image around the call:
+`0x1111` before the `syscall`, `0x2222` immediately after. With a
+hand-assembled ELF32 doing exactly what `ps2_rt::syscall::set_gs_crt`
+does (`li $v1, 2` / `syscall`):
+
+```
+0x100800 = 0x00001111   <- reached the syscall
+0x100804 = 0x00000000   <- never came back
+0x100808 = 0x00000000
+```
+
+Still zero after **25 seconds**, so it is hung, not slow. Things ruled
+out:
+
+- **Not a missing stack.** An early attempt never set `$sp`; setting it
+  to `0x01FFFFF0` (matching link.ld's `_stack_top`) changed nothing.
+- **Not `-fastboot` skipping kernel init.** `-slowboot` behaves
+  identically.
+- **Not a bad CPU state.** Read CP0 at the entry point:
+  `Status = 0x70030c11` → `KSU = 2` (user mode), `EXL = 0`, `ERL = 0`,
+  `IE = 1`, `CU0 = 1`; `EPC = 0x00100000`; `PRId = 0x00002e20` (R5900);
+  `Config = 0x00073443`. That is a normal user-mode state in which
+  `syscall` should dispatch to the kernel handler. The nested-exception
+  theory (a `syscall` taken with `EXL` already set looping in the
+  vector) is dead.
+- **Not the kernel-mode variant.** `li $v1, -2` (the negative-number
+  convention) hangs identically.
+- **Not the surrounding code.** With the `syscall` instruction removed
+  and nothing else changed, the program runs to completion — both
+  markers land (`0x1111`, `0x3333`) and all four GS register writes
+  execute.
+
+So `set_gs_crt` is broken in a way that the primary-source research
+(ps2tek's syscall table, ps2sdk's `kernel.S`, 2026-11-26) did not
+predict, and the byte-level check in `verify-solid-color.sh` cannot see,
+because the stub's bytes are exactly what we intended them to be. The
+intent was right and the encoding was right; the call still doesn't
+work.
+
+### 4. GS privileged registers *are* reachable from kuseg (this one held)
+
+Worth recording as a non-finding, since it was the obvious suspect after
+#2: a store to a raw `0x12000000` produces **no** TLB miss. The EE
+kernel maps the hardware register region, so `ps2_rt::gs::write_reg`'s
+no-segment-prefix addressing is correct as written. The 2026-11-26
+conclusion on this point stands — tested, not assumed, because #2 made
+it look doubtful.
+
+### 5. The solid-color hypothesis is still untested, not refuted
+
+With the syscall removed and all four GS registers (DISPFB1, DISPLAY1,
+BGCOLOR, PMODE) written with the values `tools/solid-color`
+const-asserts, PCSX2 fullscreen is **100% black** (checked by capturing
+the framebuffer and decoding it: every sampled pixel `rgb(0,0,0)`).
+
+That is *not* evidence against the PMODE-blend approach. `SetGsCrt` is
+what programs the PCRTC's video timings; without it there is plausibly
+no video signal for the merge circuit to blend into, so a black screen
+is the expected outcome either way. The hypothesis can't be evaluated
+until #3 is fixed.
+
+### Where this leaves the project
+
+`just test` (static + qemu) is still green, and still green for things
+that are now known to be wrong — `verify-elf.sh` asserts the ELF class
+that crashes PCSX2. Green does not mean correct; it means "unchanged
+since the last time we looked", and what we were looking at was chosen
+before anything had ever run on a PS2.
+
+The target spec needs to emit ELF32 before any of this can run on real
+hardware. That is a pointer-width change (64 → 32), not a flag tweak,
+and it touches the target JSON, `link.ld`'s assumptions, the proof-of-
+life convention from #2, and every expectation in `verify-elf.sh`.

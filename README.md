@@ -92,10 +92,16 @@ which for `alloc-hello` means the bump allocator handed out usable
 memory. `just debug-qemu <tool>` is the interactive version.
 
 This works because `link.ld` loads at `0x00100000` with
-`PhysAddr == VirtAddr`, which is both how PS2 loaders hand over control
-and how a MIPS CPU behaves at reset (`Status.ERL = 1` identity-maps
-kuseg to physical RAM) — so the same bytes you'd hand a PS2 loader boot
-under qemu, with no test-only build.
+`PhysAddr == VirtAddr`, and a MIPS CPU at reset (`Status.ERL = 1`)
+identity-maps kuseg to physical RAM, so qemu can run the image with no
+test-only build.
+
+> **Do not read a green `just test-qemu` as "this would run on a PS2".**
+> It currently would not: the ELFs are ELF64, and PCSX2's loader is
+> ELF32-only — it segfaults on them. qemu's generic ELF loader is
+> simply more permissive than any real PS2 loader. See docs/progress.md
+> 2026-11-27 ("a real BIOS arrives") for that and two other assumptions
+> that running on actual PCSX2 invalidated.
 
 **qemu is not a PS2, and a green `just test-qemu` is not evidence that
 anything works on one.** It has no GS (so `solid-color`'s actual claim —

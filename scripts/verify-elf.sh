@@ -1,6 +1,14 @@
 #!/usr/bin/env bash
 # Static structural checks on a built PS2 ELF.
 #
+# !! The "ELF class == ELF64" check below asserts a KNOWN BUG. PCSX2's
+# !! loader is ELF32-only and segfaults on our ELF64 binaries; PS2 ELFs
+# !! are ELF32 by universal convention. This check was written during the
+# !! initial scaffold, before anything had ever been booted, and it has
+# !! been locking in the defect ever since. It is left as-is only so the
+# !! fix (re-targeting to ELF32 -- docs/next-steps.md #1) flips it
+# !! deliberately rather than silently. See docs/progress.md 2026-11-27.
+#
 # None of this proves the ELF actually boots under PCSX2/real hardware —
 # that still needs a BIOS dump and a human in front of PCSX2 (see
 # docs/next-steps.md #1). What this *does* catch is regressions in

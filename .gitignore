@@ -1,1 +1,6 @@
 /target
+
+# PS2 BIOS dumps. Copyrighted Sony code -- legal to use from a console you
+# own, never redistributable, so this must not be committed. scripts/
+# run-pcsx2.sh looks here (see README's "Testing").
+/bios_dump
