@@ -15,7 +15,10 @@ custom LLVM target spec since rustc has no built-in PS2 target.
   plumbing. Every tool depends on this.
 - `tools/hello/` — minimal example tool / template for new tools.
   `tools/alloc-hello/` exercises the allocator; `tools/solid-color/`
-  attempts the solid-red-screen milestone.
+  attempts the solid-red-screen milestone; `tools/color-cycle/` is the
+  same thing cycling colours, which is the one to run on real hardware
+  (a *changing* screen is an unambiguous result where a static black
+  one isn't).
 - `scripts/` — three layers of checks: `verify-elf.sh` +
   `verify-solid-color.sh` (static), `verify-qemu.sh` +
   `verify-solid-color-qemu.sh` (run the ELF under qemu, no BIOS needed),
@@ -30,7 +33,7 @@ custom LLVM target spec since rustc has no built-in PS2 target.
 - `rust-toolchain.toml` — pins nightly + `rust-src` + `llvm-tools-preview`,
   auto-applied by rustup when you're in this directory.
 - `flake.nix` — `nix develop` shell with PCSX2, qemu, cargo-binutils, gdb,
-  just. Deliberately does **not** provide rustc/cargo — those come from
+  python3, just. Deliberately does **not** provide rustc/cargo — those come from
   your existing rustup install, version-pinned by `rust-toolchain.toml`.
 
 ## Adding a new tool
@@ -121,8 +124,9 @@ qemu also has no GS, no BIOS (so no syscall can complete), and none of
 the R5900's specifics: 128-bit MMI instructions, the non-IEEE-754 FPU,
 scratchpad RAM, cache behaviour, DMA, the GIF, VU0/VU1, SIF/IOP. The
 header of `scripts/lib-qemu.sh` has the full list. And PCSX2 is not a
-console either — see `docs/next-steps.md` #2 for a case where that
-distinction may already matter.
+console either — that distinction is no longer theoretical: the
+solid-colour milestone is blocked on an emulation gap PCSX2 documents
+in its own source. See `docs/next-steps.md` #2.
 
 `cargo test` does not work in this workspace: `.cargo/config.toml`'s
 global `build-std = ["core", "alloc"]` (required for the no-std PS2 target)
@@ -159,9 +163,10 @@ backend knows nothing about any of that. Specifically unverified/TODO:
   publishing a magic value through `ps2_rt::set_proof`.
   `tools/solid-color` attempts a solid red screen without touching the
   GIF at all (forcing the PCRTC's merge circuit to take 100% of its
-  color from `BGCOLOR`). As of 2026-11-27 it runs end to end on PCSX2
-  with a real BIOS — syscall returns, every register written — and the
-  screen stays black, because **PCSX2 cannot render what it asks for**:
+  color from `BGCOLOR`, configured for PAL). As of 2026-11-27 it runs
+  end to end on PCSX2 with a real BIOS — syscall returns, every
+  register written — and the screen stays black, because **PCSX2
+  cannot render what it asks for**:
   its merge circuit returns without presenting a frame when no read
   circuit has a framebuffer texture, which is exactly the situation the
   BGCOLOR trick creates. PCSX2's own comment there reads "Both circuits

@@ -46,6 +46,7 @@ test-static: build
     # 4 bytes of bss: ps2_rt's PS2_RT_PROOF, the proof-of-life slot.
     ./scripts/verify-elf.sh target/mipsel-sony-ps2/release/hello 4
     ./scripts/verify-elf.sh target/mipsel-sony-ps2/release/solid-color 4
+    ./scripts/verify-elf.sh target/mipsel-sony-ps2/release/color-cycle 4
     ./scripts/verify-solid-color.sh target/mipsel-sony-ps2/release/solid-color
     # alloc-hello: PS2_RT_PROOF (4) + 12 bytes padding to align
     # ps2_rt::heap's HEAP to 16 + HEAP itself (64 KiB) + BumpAllocator's
@@ -81,3 +82,7 @@ test-pcsx2: build
     # four GS registers are written. What it does NOT yet do is turn the
     # screen red -- see docs/next-steps.md #2.
     ./scripts/verify-pcsx2.sh target/mipsel-sony-ps2/release/solid-color 0x5011d000
+    # color-cycle never halts (it cycles forever by design), so only
+    # its pre-loop setup is assertable -- which is the point: reaching
+    # the loop at all means the PCRTC bring-up ran.
+    ./scripts/verify-pcsx2.sh target/mipsel-sony-ps2/release/color-cycle 0xc0c00000

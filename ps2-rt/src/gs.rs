@@ -61,19 +61,148 @@ pub const CSR_RESET: u64 = 1 << 9;
 /// passes to `GsPutIMR` during bring-up.
 pub const IMR_MASK_ALL: u64 = 0x0000_7700;
 
+/// One row of ps2sdk's `graph_mode[]` table (`ee/graph/src/
+/// graph_mode.c`): the display geometry for a video standard, plus the
+/// value its `SetGsCrt` call passes.
+///
+/// Kept as a table rather than as loose constants specifically because
+/// of how these got mixed up before: `crt_mode` is the row's `.mode`
+/// field, **not** `graph.h`'s `GRAPH_MODE_NTSC`/`_PAL`, which are
+/// indices *into* this table. Reading the geometry out of one row while
+/// taking the mode number from the enum next to it is exactly the bug
+/// that shipped on 2026-11-27 (see docs/progress.md). Bundling them
+/// makes that mismatch impossible.
+pub struct VideoMode {
+    /// Display region origin in the output signal's coordinate space.
+    pub dx: u16,
+    pub dy: u16,
+    /// Display region size in output pixels/lines (pre-magnification).
+    pub dw: u16,
+    pub dh: u16,
+    /// `SetGsCrt`'s `display_mode`. Same values libgs calls
+    /// `GS_MODE_NTSC`/`GS_MODE_PAL`.
+    pub crt_mode: i16,
+}
+
+/// `graph_mode[GRAPH_MODE_NTSC]` -- `{ 652, 26, 2560, 224, 0x02 }`.
+pub const NTSC_NONINTERLACED: VideoMode = VideoMode {
+    dx: 652,
+    dy: 26,
+    dw: 2560,
+    dh: 224,
+    crt_mode: 0x02,
+};
+
+/// `graph_mode[GRAPH_MODE_PAL]` -- `{ 680, 37, 2560, 256, 0x03 }`.
+pub const PAL_NONINTERLACED: VideoMode = VideoMode {
+    dx: 680,
+    dy: 37,
+    dw: 2560,
+    dh: 256,
+    crt_mode: 0x03,
+};
+
+/// Brings the PCRTC up for `mode` with a `width`-pixel-wide PSMCT32
+/// framebuffer at VRAM offset 0, following ps2sdk's `graph_set_mode`
+/// order: GS reset, interrupt mask, `SetGsCrt`, then SMODE2 and the
+/// display/framebuffer registers.
+///
+/// Leaves PMODE and BGCOLOR alone -- what to actually put on screen is
+/// the caller's business.
+///
+/// # Safety
+/// Same as [`write_reg`], plus: this resets the GS, so nothing else may
+/// be using it.
+#[cfg(target_arch = "mips")]
+pub unsafe fn init_display(mode: &VideoMode, width: u16) {
+    // graph_set_screen's formula: magh = dw/width, magv = dh/height,
+    // and the register field is the factor minus one (0 = 1x).
+    let magh = (mode.dw / width - 1) as u8;
+    let magv = 0; // height == mode.dh here, so magv = 1x.
+
+    unsafe {
+        write_reg(REG_CSR, CSR_RESET);
+        write_reg(REG_CSR, 0);
+        write_reg(REG_IMR, IMR_MASK_ALL);
+
+        crate::syscall::set_gs_crt(
+            crate::syscall::NON_INTERLACED,
+            mode.crt_mode,
+            crate::syscall::FIELD,
+        );
+
+        write_reg(REG_SMODE2, smode2(false, false, 0));
+        // graph_set_framebuffer's formula: fbp >> 11 (0 here), width >> 6.
+        write_reg(REG_DISPFB1, dispfb(0, (width / 64) as u8, PSMCT32, 0, 0));
+        write_reg(
+            REG_DISPLAY1,
+            display(mode.dx, mode.dy, magh, magv, mode.dw - 1, mode.dh - 1),
+        );
+    }
+}
+
+/// `PSM` encoding for 32-bit RGBA.
+pub const PSMCT32: u8 = 0;
+
 /// Writes a GS privileged register. `addr` must be one of the `REG_*`
 /// constants above (or another address in the privileged range) and the
 /// write must be a single 64-bit store -- these registers are not
 /// byte/word addressable.
+///
+/// The `sd` is hand-written because `core::ptr::write_volatile::<u64>`
+/// does **not** produce one on this target. Under o32 (32-bit pointers)
+/// LLVM lowers a volatile 64-bit store as two 32-bit `sw`s to `addr`
+/// and `addr + 4`:
+///
+/// ```text
+/// sw $2, 0x0($1)      # $1 = 0x12001000 -- CSR low word
+/// sw $zero, 0x0($2)   # $2 = 0x12001004 -- CSR high word
+/// ```
+///
+/// which is precisely the access pattern the register's documentation
+/// rules out. It worked by accident while this was an n64/ELF64 target,
+/// where LLVM had a 64-bit store to emit; re-targeting to o32 on
+/// 2026-11-27 silently split every GS register write in the project.
+/// ps2sdk gets `sd` here because ee-gcc emits one for its `volatile u64
+/// *` writes even under o32 -- the R5900 has 64-bit stores regardless
+/// of pointer width, LLVM just won't use them for this.
+///
+/// The `dsll32`/`dsrl32` dance assembles the two 32-bit halves into one
+/// 64-bit register: Rust's `reg` class is 32-bit on this target, so
+/// there is no way to hand `asm!` a `u64` directly. `lo` is
+/// zero-extended (a 32-bit value in a MIPS64 register is
+/// *sign*-extended, which would corrupt the upper half) and `hi` is
+/// shifted into place.
 ///
 /// # Safety
 /// Caller must ensure this runs in EE kernel mode (privileged-region
 /// accesses from user mode raise an Address Error exception) and that
 /// writing the given register with the given value is sound for whatever
 /// display state currently exists.
+#[cfg(target_arch = "mips")]
 pub unsafe fn write_reg(addr: *mut u64, value: u64) {
+    let lo = value as u32;
+    let hi = (value >> 32) as u32;
     unsafe {
-        core::ptr::write_volatile(addr, value);
+        core::arch::asm!(
+            // The register allocator is free to hand us $at, and the
+            // assembler warns about touching it outside `.set noat`
+            // (same reason boot.rs's _start brackets its $gp setup).
+            // Every instruction here is a real one, not a macro the
+            // assembler would need $at to expand, so this is just
+            // telling it we meant it.
+            ".set noat",
+            "dsll32 {lo}, {lo}, 0",
+            "dsrl32 {lo}, {lo}, 0",
+            "dsll32 {hi}, {hi}, 0",
+            "or     {lo}, {lo}, {hi}",
+            "sd     {lo}, 0({addr})",
+            ".set at",
+            lo = inout(reg) lo => _,
+            hi = inout(reg) hi => _,
+            addr = in(reg) addr,
+            options(nostack, preserves_flags),
+        );
     }
 }
 

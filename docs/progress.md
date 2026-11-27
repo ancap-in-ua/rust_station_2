@@ -996,3 +996,138 @@ Option 2 is the one that unblocks iteration here, and it is a
 substantially bigger piece of work than anything so far: GIF packet
 construction, a DMA channel, and VRAM addressing, with no C library to
 crib conventions from.
+
+## 2026-11-27 (fourth) — the o32 switch silently broke every GS write
+
+Prep for a hardware test, which turned up a regression the whole
+check suite was blind to.
+
+### `write_volatile::<u64>` does not emit `sd` under o32
+
+GS privileged registers are 64-bit and documented as not byte/word
+addressable; `gs.rs` has said so since it was written. Disassembling
+`color-cycle` showed what the compiler was actually emitting:
+
+```
+10005c: sw $2, 0x0($1)      # $1 = 0x12001000 -- CSR low word
+100064: sw $zero, 0x0($2)   # $2 = 0x12001004 -- CSR high word
+```
+
+Every GS register write had become a **pair of 32-bit stores**, to
+`addr` and `addr + 4` — precisely the access pattern the register docs
+rule out. Under o32 (32-bit pointers) LLVM lowers a volatile 64-bit
+store by splitting it; it had been emitting a real `sd` only because
+the target used to be n64/ELF64. Re-targeting to o32 earlier today
+broke every GS write in the project, with no source change and nothing
+in `just test` able to see it.
+
+ps2sdk gets `sd` for the same C because ee-gcc emits one for `volatile
+u64 *` writes even under o32 — the R5900 has 64-bit stores regardless
+of pointer width, LLVM just won't use them here.
+
+Fixed by hand-writing the store in `gs::write_reg`:
+
+```
+.set noat
+dsll32 {lo}, {lo}, 0
+dsrl32 {lo}, {lo}, 0     # zero-extend: a 32-bit value in a MIPS64
+dsll32 {hi}, {hi}, 0     # register is SIGN-extended, which would
+or     {lo}, {lo}, {hi}  # corrupt the upper half
+sd     {lo}, 0({addr})
+.set at
+```
+
+Rust's `reg` asm class is 32-bit on this target, so there is no way to
+hand `asm!` a `u64` — hence assembling the halves. `.set noat` because
+the allocator is free to hand us `$at` and the assembler warns
+otherwise (same bracket `boot.rs` uses around its `$gp` setup).
+
+`verify-solid-color.sh` now counts `sd` opcodes in `.text` and asserts
+8 (CSR twice, IMR, SMODE2, DISPFB1, DISPLAY1 via `init_display`, then
+BGCOLOR and PMODE). Counted from raw bytes rather than a disassembler,
+so it needs nothing `readelf` doesn't already provide: MIPS opcode 0x3F
+(SD) occupies bits 31-26, so a little-endian instruction word is an
+`sd` exactly when its most significant byte is 0xFC-0xFF (opcode 62
+would be 0xF8-0xFB — no overlap). A count of 0 means `write_reg`
+regressed to split stores.
+
+**This is the second defect in a row that was invisible to every check
+and visible in one disassembly.** The first was the ELF class. Both
+were "the source says the right thing, the compiler did something
+else." Worth a standing habit: when a register write has a documented
+*access width*, check the emitted instruction, not the source.
+
+### PAL, and a video-mode table
+
+The only console available is European, as is the only BIOS dump, so
+running NTSC made a black screen ambiguous — "approach doesn't work"
+vs. "TV didn't sync". Added `gs::VideoMode` carrying one row of
+ps2sdk's `graph_mode[]` (geometry *plus* the `SetGsCrt` mode value, so
+the two can't be taken from different places again — that was this
+morning's bug) with `NTSC_NONINTERLACED` and `PAL_NONINTERLACED`
+presets, and `gs::init_display(&mode, width)` doing ps2sdk's bring-up
+order. `solid-color` dropped from ~40 lines of register arithmetic to
+three calls, and switched to PAL.
+
+### `tools/color-cycle`
+
+A static screen is a weak test result on hardware: black could mean the
+approach fails, or that nothing booted. This cycles red/green/blue
+forever, so *motion* means booted + syscall returned + PCRTC live +
+BGCOLOR reaching the display, and nothing means the problem is upstream
+of the blend equation. It's the tool to run first on a console.
+
+Publishes its proof-of-life before entering the loop, so
+`just test-pcsx2` can still assert the setup ran even though it never
+halts. Excluded from `test-qemu` for the same reason `solid-color` is.
+
+### Unexplained: `%` makes it fail on PCSX2, and only on PCSX2
+
+With `idx = (idx + 1) % COLORS.len()` in the loop, `color-cycle`
+**never reaches `rust_main`** on PCSX2 — the proof-of-life value stays
+0 even with `set_proof` moved to the first statement of the function.
+The identical ELF runs correctly under qemu: `rust_main` reached,
+`ra = 0x10022c`, `sp = 0x1ffffe8`, proof published, `set_gs_crt`
+reached with `a1 = 3`. So the binary is sound.
+
+What was ruled out:
+
+- **Not `.rodata` access.** A `black_box`-indexed read of `COLORS`
+  published the right byte on PCSX2.
+- **Not the loop or the spin delay.** A loop writing a constant colour
+  with the same delay passes.
+- **Not segment layout.** `.bss` sits inside the RW `PT_LOAD`'s
+  `memsz` in both the passing and failing builds.
+- **Not PCSX2's CRC patching.** No patch, cheat or game-fix lines in
+  the log for any of these CRCs.
+- **Not the EE recompiler.** With `EnableEE = false` the TLB miss
+  disappears but the proof still never appears, after 30+ seconds.
+- **Not code size** in any monotonic sense: builds with `.bss` at
+  `0x100308` and `0x100358` pass, `0x100318` and `0x1002a8` fail.
+
+With the recompiler on, PCSX2 logs `TLB Miss, pc=<memset+0xc8>
+addr=0x0 [load]` — memset's `jr $ra`, i.e. a return to address 0,
+reported as a load because it's an instruction fetch. But memset is
+called exactly once, from `rt_start`, and qemu shows `ra = 0x100224`
+there, so that is a symptom rather than a cause.
+
+Sidestepped by advancing the index with a compare-and-reset instead of
+a division, which also avoids a divide in a bare-metal loop. Recorded
+rather than solved; the comment in `color-cycle` warns anyone who
+reintroduces `%`.
+
+### Harness: regenerate PCSX2's config, don't patch it
+
+`pcsx2_write_config` used to run `-testconfig` (a no-op when the ini
+exists) and then `sed` three keys, so anything changed by hand while
+debugging persisted into every later run. Setting `EnableEE = false`
+during the investigation above would have silently become part of what
+`just test-pcsx2` tests. It now deletes the ini first so every run
+starts from PCSX2's defaults plus exactly our three overrides.
+
+### Noted for later: `EnableEEConsole`
+
+PCSX2's config has `EnableEEConsole` and `EnableEESIOInput`, which is
+the lead for the text-output work (EE SIO at `0x1000_F180`). Not
+touched yet. Worth knowing it won't help on real hardware: the Slim has
+no exposed serial port, so SIO output there needs a physical cable mod.

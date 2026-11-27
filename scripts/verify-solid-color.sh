@@ -57,6 +57,39 @@ bytes="$(awk '{print $2, $3, $4, $5}' <<<"$line")"
 check "set_gs_crt raw bytes (li \$3,2 / syscall / jr \$31 / nop)" \
     "$bytes" "02000324 0c000000 0800e003 00000000"
 
+# GS privileged registers are 64-bit and are documented as not
+# byte/word addressable, so every write must be a single `sd`. That is
+# not something the source can express on this target:
+# `write_volatile::<u64>` under o32 lowers to a *pair* of 32-bit `sw`s
+# to addr and addr+4, which is exactly the access pattern the hardware
+# docs rule out. It happened to be right while this was an n64/ELF64
+# target and silently broke when it became o32 (2026-11-27), with no
+# source change and nothing else to notice it -- hence this check.
+# ps2_rt::gs::write_reg now hand-writes the `sd`; this counts them.
+#
+# Counted from raw bytes rather than a disassembler so this needs
+# nothing readelf doesn't already provide. MIPS opcode 0x3F (SD) sits
+# in bits 31-26, so a little-endian instruction word is an `sd` exactly
+# when its most significant byte is 0xFC-0xFF (opcode 62 would be
+# 0xF8-0xFB, so there's no overlap). readelf -x prints each word's
+# bytes LSB-first, making byte 4 the MSB -- characters 7-8 of the group.
+#
+# solid-color makes 8 GS register writes: CSR twice, IMR, SMODE2,
+# DISPFB1 and DISPLAY1 via gs::init_display, then BGCOLOR and PMODE.
+# Bump this if that changes; a count of 0 means write_reg regressed to
+# split stores.
+sd_count="$(readelf -x .text "$elf" | awk '
+    $1 ~ /^0x/ {
+        for (i = 2; i <= 5; i++) {
+            if (length($i) == 8) {
+                msb = strtonum("0x" substr($i, 7, 2))
+                if (and(msb, 0xFC) == 0xFC) n++
+            }
+        }
+    }
+    END { print n+0 }')"
+check "GS register writes are single 64-bit \`sd\` stores" "$sd_count" "8"
+
 if [[ "$fail" -ne 0 ]]; then
     echo "verify-solid-color: FAILED" >&2
     exit 1

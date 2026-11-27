@@ -59,12 +59,17 @@ What is known:
 Fixed along the way (progress.md has the detail):
 
 - **`SetGsCrt`'s mode argument was wrong** — we passed ps2sdk's
-  `GRAPH_MODE_NTSC` (1), which is an *index* into `graph_mode[]`. The
-  value the syscall wants is that row's `.mode` field, `0x02`
-  (= libgs's `GS_MODE_NTSC`). Now correct.
+  `GRAPH_MODE_*` constant, which is an *index* into `graph_mode[]`. The
+  value the syscall wants is that row's `.mode` field (`0x02` NTSC,
+  `0x03` PAL — libgs's `GS_MODE_*`). `gs::VideoMode` now bundles the
+  geometry and the mode value in one struct so they can't be taken
+  from different places again.
 - **CSR reset, IMR and SMODE2 were never written.** ps2sdk's
   `graph_set_mode` does all three before/around `SetGsCrt`; we now do
-  the same.
+  the same, via `gs::init_display`.
+- **Every GS register write was two 32-bit stores, not one `sd`.**
+  Introduced by the o32 re-target and invisible to every check in the
+  suite — see #3.
 
 What got resolved earlier and shouldn't be re-litigated:
 
@@ -82,8 +87,15 @@ What got resolved earlier and shouldn't be re-litigated:
 Two ways forward, answering different questions:
 
 1. **Run it on a real console** (needs #5, deployment). The only thing
-   that can settle whether the PMODE/BGCOLOR trick works. Cheap to try
-   if hardware and a loader are available — the ELF is loadable now.
+   that can settle whether the PMODE/BGCOLOR trick works. Everything
+   needed is prepared: the ELF is loadable, the display is configured
+   for **PAL** (the only console and BIOS available are European, and
+   an NTSC signal would make a black screen ambiguous), and
+   `tools/color-cycle` exists specifically so the result is
+   unambiguous — a changing screen proves booted + syscall returned +
+   PCRTC live + BGCOLOR reaching the display, where a static black
+   screen proves only that something upstream is wrong. **Run
+   `color-cycle` first.**
 2. **Put actual pixels in VRAM via GIF/DMA.** This was filed as the
    "fallback"; it is now the only route to a visible result *under
    emulation*, because PCSX2 needs a real framebuffer texture before it
@@ -97,6 +109,24 @@ Two ways forward, answering different questions:
    the lesson from the mode-number bug applies: read the *call site*,
    not just the constant next to it.
 
+## 2b. Text output over EE SIO (small, unblocks everything else)
+
+The EE has a debug UART — bytes written to `SIO_TXFIFO` (`0x1000_F180`)
+are printed by PCSX2 (`EnableEEConsole` / `EnableEESIOInput` in its
+config). It is a plain memory-mapped register write, the same mechanism
+as `gs::write_reg`, so it needs no GS, no DMA, no VRAM and no BIOS
+call.
+
+That would give the project its first real `print!`, replacing the
+current one-`u32`-read-over-PINE debugging. Worth doing before the
+GIF/DMA work, which is much easier to debug with printing than without.
+
+Two caveats: one source suggests PCSX2 only prints SIO in debug builds
+or interpreter mode (unverified — cheap to test). And it does **not**
+work on a real console: the Slim has no exposed serial port, so SIO
+there needs a hardware cable mod. On hardware, output means the screen,
+or `ps2link` over Ethernet with the DECI2 protocol implemented.
+
 ## 3. Validate the target spec dynamically, not just statically
 
 `just test` runs `test-static` (ELF invariants — entry point,
@@ -105,12 +135,21 @@ executes each ELF and asserts what it did. Code generated from the
 hand-written target spec demonstrably runs on a MIPS III CPU model.
 
 **That is a much weaker result than it sounded on the morning of
-2026-11-27.** The spec's biggest defect — emitting ELF64, which no real
-PS2 loader accepts — was invisible to both layers, and `verify-elf.sh`
-was actively asserting it as correct. Treat "the checks are green" as
-"nothing changed since we last chose what to look at", and keep in mind
-that those choices were all made before anything had run on a PS2. The
-spec work itself is now #1.
+2026-11-27.** Two separate defects that day were invisible to every
+layer of the suite and obvious in one disassembly:
+
+- the ELF class (ELF64, which no real PS2 loader accepts) — which
+  `verify-elf.sh` was actively asserting as *correct*;
+- every GS register write compiling to a pair of 32-bit `sw`s instead
+  of one `sd`, after the o32 re-target, because
+  `write_volatile::<u64>` does not emit a 64-bit store on a 32-bit
+  target.
+
+Both were "the source says the right thing, the compiler did something
+else." Standing habit worth keeping: **when a register has a documented
+access width, check the emitted instruction, not the source.** Treat
+"the checks are green" as "nothing changed since we last chose what to
+look at."
 
 What's left is specifically the parts of the spec qemu's generic MIPS
 models can't speak to:

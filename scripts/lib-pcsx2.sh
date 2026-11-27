@@ -74,9 +74,15 @@ pcsx2_skip_if_no_bios() {
 pcsx2_write_config() {
     local bios="$1"
     mkdir -p "$PCSX2_DATA"
+
+    # Always regenerate from PCSX2's defaults rather than patching
+    # whatever is already there. Otherwise a setting changed by hand
+    # while debugging (EnableEE, say) silently persists into every later
+    # run and quietly becomes part of what the checks are testing.
+    local ini="$PCSX2_DATA/PCSX2/inis/PCSX2.ini"
+    rm -f "$ini"
     "$PCSX2_BIN" -datapath "$PCSX2_DATA" -testconfig >/dev/null 2>&1 || true
 
-    local ini="$PCSX2_DATA/PCSX2/inis/PCSX2.ini"
     if [[ ! -f "$ini" ]]; then
         echo "${0##*/}: PCSX2 did not generate $ini" >&2
         return 1
