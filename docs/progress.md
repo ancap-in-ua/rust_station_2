@@ -872,3 +872,127 @@ suspicion:
   might behave differently; this is exactly the kind of exotic corner
   an emulator is allowed to get wrong.
 - Whether the `ALP = 0` reading of the blend equation is inverted.
+
+## 2026-11-27 (later still) — ps2sdk says we had the mode number wrong; PCSX2 says it can't judge the result
+
+Went to the sources the brief named — ps2dev.github.io, ps2sdk, ps2tek —
+to work out why `solid-color` draws a black screen. Found one genuine
+bug in our code and one hard limit in PCSX2 that makes the milestone
+unjudgeable there.
+
+### Bug: `SetGsCrt`'s mode argument was the table index, not the mode
+
+ps2sdk `ee/graph/src/graph_mode.c`:
+
+```c
+static const GRAPH_MODE graph_mode[22] =
+{
+    {   0,   0,    0,    0,    0 }, // AUTO
+    { 652,  26, 2560,  224, 0x02 }, // NTSC-NI
+    { 680,  37, 2560,  256, 0x03 }, // PAL-NI
+    ...
+```
+
+and `graph.h`'s `GRAPH_MODE_NTSC` is **1** — an index into that table.
+The call is `SetGsCrt(graph_interlace, graph_mode[mode].mode,
+graph_ffmd)`, so what reaches the syscall is the row's `.mode` field,
+`0x02`. ps2sdk's libgs names the same value directly:
+`GS_MODE_NTSC = 0x02`, `GS_MODE_PAL = 0x03`.
+
+`ps2_rt::syscall::NTSC` was 1 and `PAL` was 2 — the indices. We were
+telling the BIOS to configure video mode 1, which is `AUTO`'s neighbour
+in an index space the syscall knows nothing about.
+
+The sharp part: `tools/solid-color`'s geometry constants (652, 26,
+2560, 224) were read correctly out of **that same table row**, while
+the mode number was taken from the enum sitting next to it. Half the
+line was sourced properly. The 2026-11-26 note even quotes the
+`SetGsCrt(graph_interlace, graph_mode[mode].mode, graph_ffmd)` call
+verbatim — the correct value was written down at the time and then not
+used.
+
+Fixed to `NTSC = 0x02` / `PAL = 0x03`.
+`scripts/verify-solid-color-qemu.sh` caught the change immediately
+(`FAIL $a1: got 2, want 1`), which is the first time that check has
+earned its keep on a real edit rather than a deliberately broken one.
+
+### Also added, from ps2sdk's actual bring-up order
+
+`graph_set_mode` does more than call the syscall, and we were doing
+none of it:
+
+```c
+*GS_REG_CSR = (u64)1<<9;                      // GS reset
+*GS_REG_CSR = GS_SET_CSR(0,0,0,0,0,0,0,0,0,0,0,0);
+GsPutIMR(0x00007700);                         // mask GS interrupts
+SetGsCrt(graph_interlace, graph_mode[mode].mode, graph_ffmd);
+```
+
+Added `gs::REG_CSR` (`0x1200_1000`), `gs::REG_IMR` (`0x1200_1010`),
+`gs::CSR_RESET`, `gs::IMR_MASK_ALL`, and a `gs::smode2(INT, FFMD, DPMS)`
+packer matching ps2sdk's `GS_SET_SMODE2`. `solid-color` now follows
+ps2sdk's order: CSR reset → CSR clear → IMR → `SetGsCrt` → SMODE2 →
+DISPFB1 → DISPLAY1 → BGCOLOR → PMODE.
+
+SMODE2 is worth calling out because PCSX2 reads it to decide whether a
+display is live at all — `PCRTCDisplays.EnableDisplays(m_regs->PMODE,
+m_regs->SMODE2, ...)`. `SetGsCrt` is documented as setting the *timing*
+registers; SMODE2 is a separate write that ps2sdk makes separately, and
+we had never made it.
+
+### None of it changes the screen, and PCSX2 explains why
+
+Still black after all of the above. The reason is in PCSX2's own
+source, `GSRenderer::Merge`:
+
+```cpp
+if (!tex[0] && !tex[1])
+{
+    ...
+    // Both circuits off still outputs BGCOLOR on real hardware.
+    if (PCRTCDisplays.PCRTCDisplays[0].enabled || PCRTCDisplays.PCRTCDisplays[1].enabled)
+    {
+        m_real_size = GSVector2i(0, 0);
+        return false;
+    }
+}
+```
+
+`tex[0]`/`tex[1]` are the read circuits' framebuffer textures, fetched
+from the texture cache. `solid-color` never writes a pixel to VRAM —
+that is the entire point of the BGCOLOR trick — so there is no render
+target for either circuit, both are null, and **PCSX2 returns without
+presenting a frame**. The comment immediately above the early-out
+concedes that real hardware would still output BGCOLOR here.
+
+Tested the obvious escape too: with `EN1 = EN2 = 0` the
+`enabled || enabled` guard is false, so that specific early-out is
+skipped — still black.
+
+So: `solid-color` is *correct as far as PCSX2 can tell* — it loads,
+the syscall returns, every register write executes, it publishes its
+proof-of-life — and PCSX2 structurally cannot render what it asks for.
+The black screen is not evidence against the approach. It is also not
+evidence for it.
+
+This is the first point in the project where PCSX2 being an emulator
+rather than a console actually blocks progress, which next-steps.md #2
+had flagged as a possibility before it was confirmed.
+
+### What that means for the milestone
+
+Two ways forward, and they answer different questions:
+
+1. **Real hardware.** The only thing that can settle whether the
+   PMODE/BGCOLOR trick works. Everything needed is built — the ELF is
+   loadable now — but deployment isn't wired up (next-steps.md #5).
+2. **Put actual pixels in VRAM**, i.e. the GIF/DMA path. This stops
+   being the "fallback" and becomes the only route to a visible result
+   *under emulation*, since PCSX2 needs a real framebuffer texture
+   before it will composite anything at all. It also happens to be what
+   every real PS2 program does.
+
+Option 2 is the one that unblocks iteration here, and it is a
+substantially bigger piece of work than anything so far: GIF packet
+construction, a DMA channel, and VRAM addressing, with no C library to
+crib conventions from.

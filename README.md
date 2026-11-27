@@ -159,11 +159,15 @@ backend knows nothing about any of that. Specifically unverified/TODO:
   publishing a magic value through `ps2_rt::set_proof`.
   `tools/solid-color` attempts a solid red screen without touching the
   GIF at all (forcing the PCRTC's merge circuit to take 100% of its
-  color from `BGCOLOR`). As of 2026-11-27 it runs end to end on a real
-  PS2 — the BIOS `SetGsCrt` call returns, all four GS registers are
-  written — and **the screen stays black**. See `docs/next-steps.md` #2
-  for the open leads. Driving the GS properly (GIF packets over DMA) is
-  the fallback and is real, nontrivial work.
+  color from `BGCOLOR`). As of 2026-11-27 it runs end to end on PCSX2
+  with a real BIOS — syscall returns, every register written — and the
+  screen stays black, because **PCSX2 cannot render what it asks for**:
+  its merge circuit returns without presenting a frame when no read
+  circuit has a framebuffer texture, which is exactly the situation the
+  BGCOLOR trick creates. PCSX2's own comment there reads "Both circuits
+  off still outputs BGCOLOR on real hardware." Settling it needs a real
+  console; getting a visible result *under emulation* needs the GIF/DMA
+  path. See `docs/next-steps.md` #2.
 - **`$gp`/`_gp` setup is defensive, possibly unnecessary.** With
   `+noabicalls` and a static relocation model, generated code should mostly
   use absolute addressing; this is just a safety net. (It does at least

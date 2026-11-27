@@ -24,8 +24,15 @@
 # Expected arguments, from ps2sdk's graph_set_mode (ee/graph/src/
 # graph_mode.c) and ps2tek's SetGsCrt(interlaced, display_mode, frame):
 #   $a0 = GRAPH_MODE_NONINTERLACED = 0
-#   $a1 = GRAPH_MODE_NTSC          = 1
+#   $a1 = GS_MODE_NTSC             = 0x02
 #   $a2 = GRAPH_MODE_FIELD         = 0
+#
+# Note $a1 is NOT ps2sdk's GRAPH_MODE_NTSC (1). That constant indexes
+# graph_mode[]; what graph_set_mode passes to the syscall is that row's
+# `.mode` field -- `{ 652, 26, 2560, 224, 0x02 }` -- and libgs names the
+# same value GS_MODE_NTSC = 0x02 directly. Passing the index was a real
+# bug here until 2026-11-27; this check is what pins the distinction
+# down, so don't "simplify" it back to the enum name.
 #
 # Still unproven, and unprovable this way: whether the screen turns red.
 # That needs PCSX2 and a BIOS dump (docs/next-steps.md #1).
@@ -118,7 +125,8 @@ check "stopped with \`syscall\` as the next instruction" \
     "$(result next_insn_is_syscall)" "1"
 
 check "\$a0 (interlaced = GRAPH_MODE_NONINTERLACED)" "$(result a0)" "0"
-check "\$a1 (display_mode = GRAPH_MODE_NTSC)" "$(result a1)" "1"
+check "\$a1 (display_mode = GS_MODE_NTSC, the graph_mode[].mode value)" \
+    "$(result a1)" "2"
 check "\$a2 (frame = GRAPH_MODE_FIELD)" "$(result a2)" "0"
 
 if [[ "$fail" -ne 0 ]]; then

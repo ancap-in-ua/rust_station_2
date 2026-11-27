@@ -43,6 +43,23 @@ pub const REG_DISPLAY2: *mut u64 = 0x1200_00a0 as *mut u64;
 /// Background color used where PMODE.SLBG selects it instead of circuit
 /// 2's output.
 pub const REG_BGCOLOR: *mut u64 = 0x1200_00e0 as *mut u64;
+/// System status, and the GS reset control. Lives in the second
+/// privileged page (`0x1200_1000`) rather than alongside the registers
+/// above.
+pub const REG_CSR: *mut u64 = 0x1200_1000 as *mut u64;
+/// Interrupt mask. Written before bringing the display up so the GS
+/// doesn't raise interrupts nothing is set up to handle.
+pub const REG_IMR: *mut u64 = 0x1200_1010 as *mut u64;
+
+/// Writing this to [`REG_CSR`] resets the GS. ps2sdk's `graph_set_mode`
+/// does this (`*GS_REG_CSR = (u64)1 << 9;`) followed by a zeroing write,
+/// before calling `SetGsCrt` -- it is the first thing in its display
+/// bring-up sequence.
+pub const CSR_RESET: u64 = 1 << 9;
+
+/// Masks every GS interrupt source. The value ps2sdk's `graph_set_mode`
+/// passes to `GsPutIMR` during bring-up.
+pub const IMR_MASK_ALL: u64 = 0x0000_7700;
 
 /// Writes a GS privileged register. `addr` must be one of the `REG_*`
 /// constants above (or another address in the privileged range) and the
@@ -83,6 +100,18 @@ pub const fn pmode(
         | (out1_alpha_from_out2 as u64) << 6
         | (select_bgcolor as u64) << 7
         | (alpha as u64) << 8
+}
+
+/// Packs SMODE2's fields. `interlace` and `frame_mode` mirror the
+/// corresponding `set_gs_crt` arguments; `dpms` is the VESA power state
+/// (0 = on).
+///
+/// `SetGsCrt` is documented as setting the video *timing* registers, but
+/// not this one -- ps2sdk's `GS_SET_SMODE2(INT, FFMD, DPMS)` exists
+/// separately for exactly that reason, and SMODE2 carries the bit that
+/// decides whether anything reaches the CRTC at all.
+pub const fn smode2(interlace: bool, frame_mode: bool, dpms: u8) -> u64 {
+    (interlace as u64) | (frame_mode as u64) << 1 | (dpms as u64 & 0x3) << 2
 }
 
 /// Packs BGCOLOR's R/G/B fields (8 bits each, no alpha -- PMODE.ALP

@@ -59,8 +59,28 @@ unsafe extern "C" {
 }
 
 /// `display_mode` values for `set_gs_crt`.
-pub const NTSC: i16 = 1;
-pub const PAL: i16 = 2;
+///
+/// These are **not** ps2sdk's `GRAPH_MODE_NTSC`/`_PAL` (1 and 2). Those
+/// are indices into `graph_mode[]`, and what `graph_set_mode` actually
+/// passes to the syscall is that row's `.mode` field:
+///
+/// ```text
+/// { 652, 26, 2560, 224, 0x02 }, // NTSC-NI   <- graph_mode[GRAPH_MODE_NTSC]
+/// { 680, 37, 2560, 256, 0x03 }, // PAL-NI
+/// ```
+///
+/// i.e. `SetGsCrt(interlace, graph_mode[GRAPH_MODE_NTSC].mode, ffmd)`
+/// passes 2, not 1. Cross-checked against ps2sdk's libgs, which names
+/// the same values directly: `GS_MODE_NTSC = 0x02`, `GS_MODE_PAL =
+/// 0x03`.
+///
+/// This was wrong (1 and 2, the indices) until 2026-11-27, and it is
+/// why `tools/solid-color` produced a black screen on real hardware:
+/// the geometry constants were read correctly out of that same table
+/// row while the mode value was taken from the enum next to it. See
+/// docs/progress.md.
+pub const NTSC: i16 = 0x02;
+pub const PAL: i16 = 0x03;
 
 /// `interlace` values for `set_gs_crt`.
 pub const NON_INTERLACED: i16 = 0;

@@ -27,8 +27,9 @@ progress.md 2026-11-27 (both entries):
   is entitled to clobber. The 2026-11-26 syscall research was right.
 
 What's left for this item is only the hardware this environment can't
-reach: a real console. PCSX2 is not a PS2 either — see #2's open
-questions for a case where that distinction may already matter.
+reach: a real console. And PCSX2 is not a console — that distinction
+has stopped being theoretical, see #2: the solid-colour milestone is
+now blocked on an emulation gap PCSX2 documents in its own source.
 
 A BIOS dump goes in `bios_dump/` (gitignored — copyrighted, not
 redistributable). Without one, `test-static` and `test-qemu` still run
@@ -36,65 +37,65 @@ and `test-pcsx2` skips loudly.
 
 ## 2. Minimal GS output — the real first milestone
 
-**This is now the only thing standing between the project and its first
-visible result, and it is genuinely unsolved.**
+**Status: `solid-color` is as correct as PCSX2 can tell, and PCSX2
+structurally cannot render what it asks for.** Deciding whether the
+approach actually works now needs real hardware — or a different
+approach. See progress.md 2026-11-27 (third entry).
 
-`solid-color` runs end to end on a real PS2 as of 2026-11-27: the
-`SetGsCrt` syscall returns, all four GS registers are written, the tool
-reaches its terminal state and publishes `0x5011d000`. And the screen
-is **100% black**, not red.
+What is known:
 
-So the PMODE-blend approach is finally being *tested* rather than
-blocked, and it isn't doing what the GS User's Manual reading
-predicted. Verified the capture isn't lying by booting the BIOS itself
-and capturing that — it comes back with the boot screen's colors.
+- The tool runs end to end on PCSX2 with a real BIOS: `SetGsCrt`
+  returns, CSR/IMR/SMODE2/DISPFB1/DISPLAY1/BGCOLOR/PMODE are all
+  written in ps2sdk's own order, it publishes `0x5011d000` and halts.
+  `just test-pcsx2` asserts all of that.
+- The screen is nevertheless 100% black, and **that is a PCSX2
+  limitation, not evidence about the approach.** `GSRenderer::Merge`
+  returns without presenting a frame when neither read circuit has a
+  framebuffer texture, which is exactly our case since we deliberately
+  never write a pixel to VRAM. PCSX2's own comment on that early-out
+  reads "Both circuits off still outputs BGCOLOR on real hardware."
+  Also tried with both circuits disabled: still black.
 
-What got resolved along the way, so it's not re-litigated:
+Fixed along the way (progress.md has the detail):
+
+- **`SetGsCrt`'s mode argument was wrong** — we passed ps2sdk's
+  `GRAPH_MODE_NTSC` (1), which is an *index* into `graph_mode[]`. The
+  value the syscall wants is that row's `.mode` field, `0x02`
+  (= libgs's `GS_MODE_NTSC`). Now correct.
+- **CSR reset, IMR and SMODE2 were never written.** ps2sdk's
+  `graph_set_mode` does all three before/around `SetGsCrt`; we now do
+  the same.
+
+What got resolved earlier and shouldn't be re-litigated:
 
 - "How does the EE even address `0x12000000`?" — identity-mapped, no
-  segment prefix needed (confirmed against ps2tek's EE memory map, and
-  since re-confirmed *on PCSX2* on 2026-11-27: a raw store to
-  `0x12000000` from a user-mode ELF takes no TLB miss. Re-tested
-  because the neighbouring assumption about low RAM turned out to be
-  wrong — see progress.md).
+  segment prefix needed (ps2tek's EE memory map, re-confirmed on PCSX2:
+  a raw store there from a user-mode ELF takes no TLB miss).
 - "Where do NTSC/PAL sync-timing constants come from?" — they don't;
   the GS Users Manual says that's a BIOS kernel service
-  (`ps2_rt::syscall::set_gs_crt`, BIOS syscall `0x02`), not something
-  application code hand-derives. Sourced from ps2tek + ps2sdk, and the
-  compiled stub's raw bytes are checked against the hand-assembled
-  expectation in `scripts/verify-solid-color.sh`.
-- PMODE/BGCOLOR/DISPFB/DISPLAY's bit layouts and the PCRTC blend
-  equation — confirmed against the GS Users Manual directly (not just
-  ps2sdk macro names), so the "force the whole display to `BGCOLOR` via
-  `MMOD`/`SLBG`/`ALP=0`, skipping GIF/DMA entirely" approach is no longer
-  a hypothesis.
+  (`ps2_rt::syscall::set_gs_crt`), not something application code
+  hand-derives.
+- PMODE/BGCOLOR/DISPFB/DISPLAY bit layouts — confirmed against the GS
+  Users Manual directly. Note the *bit layouts* are confirmed; "they
+  add up to a red screen" is precisely what remains unconfirmed.
 
-What's actually still open, roughly in order of suspicion:
+Two ways forward, answering different questions:
 
-- **`SMODE2` is never written.** `ps2_rt::gs` defines `REG_SMODE2`
-  ("interlace, field mode, **display enable**") and `solid-color`
-  doesn't touch it. If `SetGsCrt` doesn't leave the display enabled,
-  nothing reaches the CRTC no matter what the merge circuit computes.
-  Cheapest thing to try first.
-- **Whether PCSX2's PCRTC emulates this path at all.** The whole trick
-  depends on `SLBG`/`MMOD`/`ALP` producing output from a circuit whose
-  framebuffer points at VRAM nobody ever wrote. That is an exotic
-  corner, and an emulator is allowed to get it wrong where real
-  hardware wouldn't. Distinguishing "our registers are wrong" from
-  "PCSX2 doesn't model this" may need real hardware — the first thing
-  in this project where PCSX2 being not-a-PS2 actually bites.
-- **Whether the `ALP = 0` reading of the blend equation is inverted.**
-  Re-derive from the GS User's Manual rather than from our own note.
-- If the PCRTC approach turns out to be a dead end, the fallback is the
-  original plan: issue a DMA transfer with a GIF packet to push an
-  actual primitive (even a full-screen rectangle) to the GS. That's
-  real hardware programming with no C library to crib conventions from
-  — budget real time for it if it comes to that.
+1. **Run it on a real console** (needs #5, deployment). The only thing
+   that can settle whether the PMODE/BGCOLOR trick works. Cheap to try
+   if hardware and a loader are available — the ELF is loadable now.
+2. **Put actual pixels in VRAM via GIF/DMA.** This was filed as the
+   "fallback"; it is now the only route to a visible result *under
+   emulation*, because PCSX2 needs a real framebuffer texture before it
+   composites anything. It is also what every real PS2 program does, so
+   it has to happen eventually regardless.
 
-Note the "no longer a hypothesis" claim in the bullet list above was
-written before anything had run. The bit layouts and the blend equation
-really are confirmed against the primary source; what was never
-confirmed is that they add up to a red screen, and so far they don't.
+   Substantially bigger than anything so far: GIF packet construction
+   (a GIFtag plus register writes), driving a DMA channel to the GIF,
+   and VRAM addressing — with no C library to crib conventions from.
+   ps2sdk's `ee/draw` and `ee/dma` are the reference to read first, and
+   the lesson from the mode-number bug applies: read the *call site*,
+   not just the constant next to it.
 
 ## 3. Validate the target spec dynamically, not just statically
 
@@ -140,10 +141,11 @@ backed by a fixed 64 KiB static array — intentionally not a
 freelist, and intentionally not sized from `link.ld`'s
 `_heap_start`/`_stack_top` gap, since deciding how much of the
 remaining RAM is safe to hand to the heap vs. leave as stack headroom
-isn't something to guess), and `tools/alloc-hello` exercises it. Like
-everything else, this is statically checked (`just test` — including a
-bss-size check now that this is the first tool with non-empty `.bss`)
-but not dynamically run (#1).
+isn't something to guess), and `tools/alloc-hello` exercises it. This
+is checked at all three layers now — static (including a bss-size
+check), qemu, and real PCSX2, where the heap read back over PINE shows
+the bump allocator's signature directly: the dead 4-element `Vec`
+unreclaimed, then the live 8-element one.
 
 64 KiB was picked as "clearly enough for a `Vec<u32>` of 8 elements,
 clearly not so much it's a real resource decision" — revisit if a

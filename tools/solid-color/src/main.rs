@@ -5,15 +5,33 @@
 //! see `ps2_rt::gs`'s module doc for the confirmed-against-primary-source
 //! blend equation), so the framebuffer's actual contents never matter.
 //!
-//! "The screen actually turns red" is still UNCONFIRMED: that needs a
-//! BIOS dump to boot under PCSX2/hardware (see docs/next-steps.md #1),
-//! and it's the one claim no amount of emulation here can settle -- qemu
-//! has no GS and no BIOS, so the syscall below can't even complete
-//! there. What *is* dynamically confirmed (docs/progress.md 2026-11-27,
-//! `scripts/verify-solid-color-qemu.sh`) is that execution reaches
-//! `set_gs_crt` with the right arguments in `$a0`-`$a2`. Everything past
-//! that instruction rests on the register values being right, which is
-//! sourced (see below) but not observed.
+//! "The screen actually turns red" is UNCONFIRMED and **cannot be
+//! confirmed on PCSX2** — not because of anything wrong here, but
+//! because PCSX2 does not emulate this path. Its merge circuit bails
+//! before BGCOLOR is ever applied when no read circuit has a real
+//! framebuffer texture, which is precisely our situation (we never
+//! write a pixel to VRAM). From `GSRenderer::Merge`:
+//!
+//! ```text
+//! if (!tex[0] && !tex[1])
+//! {
+//!     ...
+//!     // Both circuits off still outputs BGCOLOR on real hardware.
+//!     if (PCRTCDisplays[0].enabled || PCRTCDisplays[1].enabled)
+//!     {
+//!         m_real_size = GSVector2i(0, 0);
+//!         return false;
+//!     }
+//! }
+//! ```
+//!
+//! PCSX2's own comment concedes the divergence. Verified empirically
+//! too: black with `EN1 = 1` (the configuration below) and black with
+//! both circuits disabled. So this tool runs correctly end to end on
+//! PCSX2 — syscall returns, every register written, proof-of-life
+//! published — and still shows nothing, and that tells us nothing about
+//! hardware. Settling it needs a real console; see docs/next-steps.md
+//! #2.
 //!
 //! Display geometry (`DX`/`DY`/`DW`/`DH`/`MAGH`/`MAGV`/`FBW`) is not
 //! hand-derived: these are ps2sdk's own `graph_mode[GRAPH_MODE_NTSC]`
@@ -84,7 +102,12 @@ const PMODE_VALUE: u64 = gs::pmode(true, false, true, false, true, 0);
 const _: () = assert!(DISPFB1_VALUE == 0x1400);
 const _: () = assert!(DISPLAY1_VALUE == 0x000d_f9ff_0181_a28c);
 const _: () = assert!(BGCOLOR_VALUE == 0xff);
+// Non-interlaced, field mode, DPMS on -- the same three values handed to
+// set_gs_crt, which is what ps2sdk keeps them consistent with.
+const SMODE2_VALUE: u64 = gs::smode2(false, false, 0);
+
 const _: () = assert!(PMODE_VALUE == 0xa5);
+const _: () = assert!(SMODE2_VALUE == 0x0);
 
 /// Published once every register write below has happened.
 const PROOF_OF_LIFE_VALUE: u32 = 0x5011_D000;
@@ -92,17 +115,29 @@ const PROOF_OF_LIFE_VALUE: u32 = 0x5011_D000;
 #[no_mangle]
 extern "C" fn rust_main() -> ! {
     unsafe {
+        // Order and contents follow ps2sdk's own bring-up
+        // (`graph_set_mode` -> `graph_set_screen` ->
+        // `graph_set_framebuffer` -> `graph_set_bgcolor`), rather than
+        // the "just write the four interesting registers" sequence this
+        // tool used until 2026-11-27. Everything before `set_gs_crt`
+        // here was missing, and SMODE2 was never written at all.
+        gs::write_reg(gs::REG_CSR, gs::CSR_RESET);
+        gs::write_reg(gs::REG_CSR, 0);
+        gs::write_reg(gs::REG_IMR, gs::IMR_MASK_ALL);
+
         syscall::set_gs_crt(syscall::NON_INTERLACED, syscall::NTSC, syscall::FIELD);
+
+        gs::write_reg(gs::REG_SMODE2, SMODE2_VALUE);
         gs::write_reg(gs::REG_DISPFB1, DISPFB1_VALUE);
         gs::write_reg(gs::REG_DISPLAY1, DISPLAY1_VALUE);
         gs::write_reg(gs::REG_BGCOLOR, BGCOLOR_VALUE);
         gs::write_reg(gs::REG_PMODE, PMODE_VALUE);
     }
-    // Reaching here means the whole sequence ran. Today it never does:
-    // `set_gs_crt` above hangs and never returns on PCSX2 (see this
-    // module's doc comment), so this slot stays 0 and that is how the
-    // harness tells "the syscall is still broken" from "the syscall
-    // works but the screen isn't red" -- two very different problems.
+    // Reaching here means the whole sequence ran -- it does, on real
+    // PCSX2. That is what separates "the register writes never happened"
+    // from "they happened and the screen still isn't red", which are
+    // very different problems and were confused for each other once
+    // already (see docs/progress.md 2026-11-27).
     ps2_rt::set_proof(PROOF_OF_LIFE_VALUE);
     ps2_rt::ps2_rt_halt()
 }
